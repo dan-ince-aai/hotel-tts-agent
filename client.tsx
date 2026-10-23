@@ -1,480 +1,735 @@
 /// <reference types="vite/client" />
 import "@alexkroman1/aai-ui/styles.css";
-import {
-  ChatView,
-  Form,
-  type FormValues,
-  mountClient,
-  SelectField,
-  SidebarLayout,
-  SubmitButton,
-  TextField,
-  useAgentState,
-  useSession,
-} from "@alexkroman1/aai-ui";
-import { type ReactNode, useEffect, useState, useSyncExternalStore } from "react";
-import { type DeskView, deskView, emptyHotelState } from "./shared.ts";
+import { mountClient, useSession } from "@alexkroman1/aai-ui";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import type { CardView } from "./study/cards.ts";
 
 /**
- * The study's one screen — Phase 7 of `docs/tts-preference-build-plan.md`.
+ * The blind test's one page.
  *
- * A visit is three screens in a row on the same page: a NAME GATE, the hotel
- * CALL, and then the SURVEY. The two new ones book-end the call the repo already
- * ships, and both are assembled from the `@alexkroman1/aai-ui` form pieces — no
- * new form kit, per the concept plan ("The screen — we reuse the one we already
- * have").
+ * A visit: SIGN IN with an email → a SESSION of two calls to the Harborlight
+ * front desk, each with its own persona card → the QUESTIONNAIRE → the next
+ * session, up to six.
  *
- * - **Name gate.** The Start control stays off until a name is entered. The name
- *   is held here and carried on the survey POST, where the server backfills it
- *   onto the call's `visitors` row (see `db.ts`'s `recordSurvey`). Because the
- *   SERVER picks the voice, the browser never sends — or sees — a voice label.
- * - **Call.** Once started, the shipped `ChatView` and the hotel `DeskSidebar`
- *   below, unchanged.
- * - **Survey.** When the call ends — `started` flips back to `false`, which is
- *   what `end()` and a server hang-up both do — the four Likert questions appear
- *   and POST to `/survey` as `{ callId, name, q1..q4 }`, the shared contract the
- *   server's handler reads. The hidden voice label is attached there, keyed by
- *   the call id.
+ * ## What the page knows, and what it never does
  *
- * The call id is the session id. The browser learns it from the server's config
- * frame via `mountClient`'s `onSessionId`, which feeds the tiny store below so a
- * component can read it; it is the thread that ties this visit's survey row to
- * the voice the server chose.
+ * The server hands a session over as two opaque call tokens and two persona
+ * cards (`study/api.ts`). Which call is ours, which competitor, which voice —
+ * none of it reaches the browser. The socket for a call presents its token (see
+ * {@link CallSocket}) and the server picks the engine. The page shows no
+ * transcript either: the participant judges only what they hear.
+ *
+ * ## Calls end three ways
+ *
+ * The caller presses END CALL (the call is done); the call DROPS (a fatal session
+ * error — they may retry it, which the server counts as another attempt, or skip
+ * it); or they SKIP it because it is not working. A session with a skipped call
+ * is closed without the questionnaire — there is nothing fair to compare — and
+ * still counts toward the six.
  */
 
 // ---------------------------------------------------------------------------
-// The call id, learned from the server and read by the survey.
+// The call socket: the framework's session, pointed at one call.
 // ---------------------------------------------------------------------------
 
-let currentCallId: string | null = null;
-const callIdListeners = new Set<() => void>();
-
-/** Fed by `mountClient`'s `onSessionId` — the one place the id arrives. */
-function setCurrentCallId(id: string): void {
-  currentCallId = id;
-  for (const listener of callIdListeners) listener();
-}
-
-/** The current call id, or `null` before the server has sent one. */
-function useCallId(): string | null {
-  return useSyncExternalStore(
-    (onChange) => {
-      callIdListeners.add(onChange);
-      return () => callIdListeners.delete(onChange);
-    },
-    () => currentCallId,
-    () => currentCallId,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// The four questions.
-// ---------------------------------------------------------------------------
+/** The token of the call the next socket is for. Set just before `start()`. */
+let activeCallToken = "";
 
 /**
- * The four Likert statements, in order (concept plan, "The four questions"). All
- * four are worded so that agreeing is the good answer, so a higher number is
- * better on every one.
+ * The session's WebSocket, with the active call's token on the URL. Injected
+ * through `mountClient`, so the framework's own session machinery is used
+ * unchanged. An injected constructor never reconnects on its own, which is what
+ * the study wants: a dropped call is the participant's choice to retry, and each
+ * retry is counted.
  */
-const QUESTIONS: readonly { name: "q1" | "q2" | "q3" | "q4"; statement: string }[] = [
-  { name: "q1", statement: "The voice agent sounded natural." },
-  { name: "q2", statement: "The voice agent spoke in the tone and speed of a real person." },
-  { name: "q3", statement: "The voice agent always correctly pronounced commonly known names." },
-  { name: "q4", statement: "The voice agent always correctly pronounced numbers and abbreviations." },
-];
-
-/** The five points of the agree/disagree scale, worst (1) to best (5). */
-const SCALE: readonly { value: string; label: string }[] = [
-  { value: "1", label: "1 — Strongly disagree" },
-  { value: "2", label: "2 — Disagree" },
-  { value: "3", label: "3 — Neither agree nor disagree" },
-  { value: "4", label: "4 — Agree" },
-  { value: "5", label: "5 — Strongly agree" },
-];
+class CallSocket extends WebSocket {
+  constructor(url: string | URL, protocols?: string | string[]) {
+    const withCall = new URL(String(url));
+    withCall.searchParams.set("call", activeCallToken);
+    super(withCall, protocols);
+  }
+}
 
 // ---------------------------------------------------------------------------
-// The three screens.
+// The API.
 // ---------------------------------------------------------------------------
 
-/** A centered card on the themed page — the frame the gate and the survey share. */
-function CenterCard({ children }: { children: ReactNode }) {
+interface Progress {
+  participant: string;
+  completed: number;
+  total: number;
+  canContinue: boolean;
+  /** A session was handed out and not finished; Start resumes it. */
+  open: boolean;
+}
+
+interface SessionView {
+  session: string;
+  index: number;
+  total: number;
+  calls: { token: string; position: 1 | 2; card: CardView; done: boolean; skipped: boolean }[];
+}
+
+interface Ratings {
+  naturalness: number;
+  tone: number;
+  accuracy: number;
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  if (!response.ok) throw new Error(payload.error ?? `the server answered ${response.status}`);
+  return payload as T;
+}
+
+/** Fire-and-forget call events; a lost one must not strand the participant. */
+function reportCall(call: string, type: "completed" | "skipped" | "dropped"): void {
+  post("/api/calls/event", { call, type }).catch(() => {});
+}
+
+const PARTICIPANT_KEY = "harborlight.participant";
+
+function rememberedParticipant(): string | null {
+  try {
+    return localStorage.getItem(PARTICIPANT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberParticipant(token: string | null): void {
+  try {
+    if (token === null) localStorage.removeItem(PARTICIPANT_KEY);
+    else localStorage.setItem(PARTICIPANT_KEY, token);
+  } catch {
+    // Private mode or blocked storage: the participant signs in again next time.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Building blocks.
+// ---------------------------------------------------------------------------
+
+/** A centered card on the themed page — the frame every screen shares. */
+function CenterCard({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-aai-bg p-4 text-aai-text">
-      <div className="flex w-full max-w-md flex-col gap-6 rounded-2xl bg-aai-surface p-6 shadow-lg sm:p-8">
+      <div
+        className={`flex w-full ${wide ? "max-w-2xl" : "max-w-md"} flex-col gap-6 rounded-2xl bg-aai-surface p-6 shadow-lg sm:p-8`}
+      >
         {children}
       </div>
     </main>
   );
 }
 
-/**
- * The name gate. The Start control is disabled until a name is entered; a bare
- * `<form>` with a `required` field also blocks an empty submit, so the Enter key
- * and the button agree. `onStart` hands the trimmed name up and begins the call.
- */
-function NameGate({ onStart }: { onStart: (name: string) => void }) {
-  const [name, setName] = useState("");
-  const trimmed = name.trim();
+function Heading({ title, children }: { title: string; children?: ReactNode }) {
+  return (
+    <header className="flex flex-col gap-2">
+      <h1 className="text-balance text-2xl font-bold">{title}</h1>
+      {children && <div className="text-pretty text-sm leading-relaxed opacity-70">{children}</div>}
+    </header>
+  );
+}
+
+function Button({
+  children,
+  onClick,
+  disabled = false,
+  kind = "primary",
+  type = "button",
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  kind?: "primary" | "quiet";
+  type?: "button" | "submit";
+}) {
+  const look =
+    kind === "primary"
+      ? "bg-aai-primary text-aai-bg font-semibold"
+      : "border border-aai-border text-aai-text opacity-80";
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      onClick={onClick}
+      className={`rounded-lg px-4 py-2.5 text-base transition-opacity disabled:cursor-not-allowed disabled:opacity-40 ${look}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ErrorLine({ error }: { error: string | null }) {
+  return error ? <p className="text-sm text-red-400">{error}</p> : null;
+}
+
+/** The persona card: who the caller is, which night, where they live. */
+function PersonaCard({ card }: { card: CardView }) {
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 rounded-xl border border-aai-border bg-aai-bg p-4 text-sm">
+      <dt className="opacity-60">Your name</dt>
+      <dd className="font-medium">{card.name}</dd>
+      <dt className="opacity-60">Night</dt>
+      <dd className="font-medium">{card.night}</dd>
+      <dt className="opacity-60">Address</dt>
+      <dd className="font-medium">{card.address}</dd>
+    </dl>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sign in.
+// ---------------------------------------------------------------------------
+
+function SignIn({ onSignedIn }: { onSignedIn: (progress: Progress) => void }) {
+  const [email, setEmail] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   return (
     <CenterCard>
-      <header className="flex flex-col gap-2">
-        <h1 className="text-balance text-2xl font-bold">The Harborlight Hotel</h1>
-        <p className="text-pretty text-sm leading-relaxed opacity-70">
-          You'll book a room with our front desk, then answer four quick questions about how the
-          voice sounded. Enter your name to begin.
-        </p>
-      </header>
+      <Heading title="Hotel desk listening test">
+        You'll phone a hotel front desk twice, then tell us which call you'd rather have had. Each
+        session takes about five minutes; you can do up to six. Use headphones and a quiet room.
+      </Heading>
       <form
         className="flex flex-col gap-4"
         onSubmit={(event) => {
           event.preventDefault();
-          if (trimmed !== "") onStart(trimmed);
+          setBusy(true);
+          setError(null);
+          post<Progress>("/api/signin", { email })
+            .then((progress) => {
+              rememberParticipant(progress.participant);
+              onSignedIn(progress);
+            })
+            .catch((cause: Error) => setError(cause.message))
+            .finally(() => setBusy(false));
         }}
       >
         <label className="flex flex-col gap-1.5 text-sm font-medium">
-          Your name
+          Work email
           <input
             autoFocus
-            name="name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="e.g. Dana"
+            type="email"
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="you@assemblyai.com"
             className="rounded-lg border border-aai-border bg-aai-bg px-3 py-2 text-base text-aai-text outline-none focus:border-aai-primary"
           />
         </label>
-        <button
-          type="submit"
-          disabled={trimmed === ""}
-          className="rounded-lg bg-aai-primary px-4 py-2.5 text-base font-semibold text-aai-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Start call
-        </button>
+        <ErrorLine error={error} />
+        <Button type="submit" disabled={busy || email.trim() === ""}>
+          Continue
+        </Button>
       </form>
     </CenterCard>
   );
 }
 
-/**
- * The four-question survey, shown once the call ends. Built from the shipped
- * `Form`/`SelectField`/`SubmitButton` and POSTed to `/survey` as the shared
- * `{ callId, name, q1..q4 }` body. The answers go over as numbers 1..5.
- */
-function Survey({
-  name,
-  callId,
-  onDone,
-}: {
-  name: string;
-  callId: string;
-  onDone: () => void;
-}) {
-  const [error, setError] = useState<string | undefined>(undefined);
+// ---------------------------------------------------------------------------
+// One call.
+// ---------------------------------------------------------------------------
 
-  async function submit(values: FormValues) {
-    setError(undefined);
-    try {
-      const response = await fetch("/survey", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          callId,
-          name,
-          q1: Number(values.q1),
-          q2: Number(values.q2),
-          q3: Number(values.q3),
-          q4: Number(values.q4),
-        }),
-      });
-      if (!response.ok) throw new Error(`server answered ${response.status}`);
-      onDone();
-    } catch (cause) {
-      setError(
-        `Sorry, we couldn't save your answers (${
-          cause instanceof Error ? cause.message : String(cause)
-        }). Please try again.`,
-      );
-    }
-  }
+const STATE_LABEL: Record<string, string> = {
+  disconnected: "Connecting…",
+  connecting: "Connecting…",
+  ready: "Connected",
+  listening: "Listening — go ahead",
+  thinking: "…",
+  speaking: "The desk is speaking",
+  error: "Something went wrong",
+};
+
+/**
+ * The live call. Starts the session on mount, ends it on the way out. A fatal
+ * error is a DROP: the session is ended and the parent offers retry or skip.
+ */
+function LiveCall({
+  call,
+  label,
+  onEnded,
+  onDropped,
+  onSkipped,
+}: {
+  call: SessionView["calls"][number];
+  label: string;
+  onEnded: () => void;
+  onDropped: () => void;
+  onSkipped: () => void;
+}) {
+  const session = useSession();
+  const started = useRef(false);
+  // An error already showing when this call mounted belongs to an earlier call
+  // (a retry follows a drop); only a NEW fatal error drops this one.
+  const staleError = useRef(session.error);
+  const dropped = useRef(false);
+  const live = useRef(session);
+  live.current = session;
+
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    activeCallToken = call.token;
+    live.current.start();
+  }, [call.token]);
+
+  // Leaving the screen any other way (closing the tab aside) hangs up.
+  useEffect(() => () => live.current.end(), []);
+
+  const error = session.error;
+  useEffect(() => {
+    if (dropped.current || !error?.fatal || error === staleError.current) return;
+    dropped.current = true;
+    live.current.end();
+    onDropped();
+  }, [error, onDropped]);
 
   return (
     <CenterCard>
-      <header className="flex flex-col gap-2">
-        <h1 className="text-balance text-2xl font-bold">How did that sound?</h1>
-        <p className="text-pretty text-sm leading-relaxed opacity-70">
-          Thanks, {name}. Four quick questions about the voice you just heard.
-        </p>
-      </header>
-      <Form onSubmit={submit} error={error} className="flex flex-col gap-5">
-        {QUESTIONS.map((question) => (
-          <SelectField
-            key={question.name}
-            name={question.name}
-            label={question.statement}
-            defaultValue=""
-            required
-          >
-            {/* An empty, un-choosable default so `required` blocks a submit until
-                the caller actually picks a point on the scale. */}
-            <option value="" disabled>
-              Choose…
-            </option>
-            {SCALE.map((point) => (
-              <option key={point.value} value={point.value}>
-                {point.label}
-              </option>
-            ))}
-          </SelectField>
-        ))}
-        <SubmitButton>Send answers</SubmitButton>
-      </Form>
+      <Heading title={label}>Book a room using the details on your card.</Heading>
+      <PersonaCard card={call.card} />
+      <div className="flex items-center gap-3 rounded-lg bg-aai-bg px-4 py-3 text-sm">
+        <span
+          className={`h-2.5 w-2.5 rounded-full ${session.state === "speaking" ? "animate-pulse bg-aai-primary" : session.state === "listening" ? "bg-green-400" : "bg-aai-border"}`}
+        />
+        <span>{STATE_LABEL[session.state] ?? session.state}</span>
+      </div>
+      <p className="text-xs leading-relaxed opacity-60">
+        When the desk says goodbye, end the call. If you can't hear anything or the call isn't
+        working, skip it.
+      </p>
+      <div className="flex flex-wrap justify-between gap-3">
+        <Button
+          kind="quiet"
+          onClick={() => {
+            session.end();
+            onSkipped();
+          }}
+        >
+          Skip — not working
+        </Button>
+        <Button
+          onClick={() => {
+            session.end();
+            onEnded();
+          }}
+        >
+          End call
+        </Button>
+      </div>
     </CenterCard>
   );
 }
 
 // ---------------------------------------------------------------------------
-// The hotel desk sidebar — reused from the shipped screen, unchanged.
+// The questionnaire.
 // ---------------------------------------------------------------------------
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="flex flex-col gap-2">
-      <h3 className="text-[11px] font-bold uppercase tracking-wider opacity-60">{title}</h3>
-      {children}
-    </section>
-  );
-}
+const PREFERENCE: readonly { value: number; label: string }[] = [
+  { value: -2, label: "Call 1, clearly" },
+  { value: -1, label: "Call 1, slightly" },
+  { value: 0, label: "No preference" },
+  { value: 1, label: "Call 2, slightly" },
+  { value: 2, label: "Call 2, clearly" },
+];
 
-function Row({ label, value }: { label: string; value: string | null }) {
+const REASONS: readonly { value: string; label: string }[] = [
+  { value: "human", label: "Sounded more human" },
+  { value: "tone", label: "Tone fit the conversation better" },
+  { value: "accuracy", label: "Said names, dates and numbers right" },
+  { value: "speed", label: "Responded faster" },
+  { value: "other", label: "Something else" },
+];
+
+const RATING_QUESTIONS: readonly { key: keyof Ratings; question: string; low: string; high: string }[] = [
+  {
+    key: "naturalness",
+    question: "How much did it sound like a real person?",
+    low: "Obviously a computer",
+    high: "Could be a person",
+  },
+  { key: "tone", question: "How well did its tone fit the conversation?", low: "Very wrong", high: "Exactly right" },
+  {
+    key: "accuracy",
+    question: "How correctly did it say names, dates, numbers and the address?",
+    low: "Many mistakes",
+    high: "No mistakes",
+  },
+];
+
+function Scale({
+  name,
+  value,
+  onChange,
+  low,
+  high,
+}: {
+  name: string;
+  value: number | undefined;
+  onChange: (value: number) => void;
+  low: string;
+  high: string;
+}) {
   return (
-    <div className="flex justify-between gap-3 text-sm">
-      <span className="opacity-60">{label}</span>
-      <span className={value === null ? "opacity-40 italic" : "text-right font-medium"}>
-        {value ?? "pending"}
-      </span>
+    <div className="flex flex-col gap-1">
+      <div className="flex gap-2">
+        {[1, 2, 3, 4, 5].map((point) => (
+          <label
+            key={point}
+            className={`flex h-10 flex-1 cursor-pointer items-center justify-center rounded-lg border text-sm ${value === point ? "border-aai-primary bg-aai-primary text-aai-bg" : "border-aai-border"}`}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={point}
+              checked={value === point}
+              onChange={() => onChange(point)}
+              className="sr-only"
+            />
+            {point}
+          </label>
+        ))}
+      </div>
+      <div className="flex justify-between text-xs opacity-60">
+        <span>{low}</span>
+        <span>{high}</span>
+      </div>
     </div>
   );
 }
 
-const KIND_LABELS: Record<DeskView["ledger"][number]["kind"], string> = {
-  followup: "Followup",
-  wakeup_call: "Wake-up call",
-  do_not_disturb: "Do not disturb",
-  waitlist: "Waitlist",
-  tour: "Tour",
-  spa: "Spa",
-  business_center: "Business centre",
-  flowers: "Florist",
-  email: "Email",
-  transfer: "Transfer",
-  flight_reconfirmation: "Flight",
-  airport_car: "Hotel car",
-  emergency: "EMERGENCY",
-  guest_message: "Guest message",
-  group_inquiry: "Group inquiry",
-  walk: "Walk",
-};
+function Questionnaire({
+  participant,
+  view,
+  onDone,
+}: {
+  participant: string;
+  view: SessionView;
+  onDone: (progress: Progress) => void;
+}) {
+  const [preference, setPreference] = useState<number | undefined>(undefined);
+  const [reasons, setReasons] = useState<string[]>([]);
+  const [comment, setComment] = useState("");
+  const [ratings, setRatings] = useState<Record<1 | 2, Partial<Ratings>>>({ 1: {}, 2: {} });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-// The desk before the first tool call, derived from the projection itself so a
-// new DeskView field can't miss the pre-first-call render.
-//
-// **This template does NOT pass its projection to `useAgentState`**, and the
-// reason is the browser bundle rather than style: that overload derives the
-// empty frame by calling the projection, which calls the slot's `create()` —
-// and this slot's factory lives in `session.ts` and pulls `seed.ts`, so
-// importing it here would ship every seeded booking to the browser.
-// `emptyHotelState()` is the same shape without the seed. Reach for the
-// projection overload everywhere the factory is cheap.
-const EMPTY_VIEW: DeskView = deskView(emptyHotelState());
+  const complete = (r: Partial<Ratings>): r is Ratings =>
+    r.naturalness !== undefined && r.tone !== undefined && r.accuracy !== undefined;
+  const ready = preference !== undefined && complete(ratings[1]) && complete(ratings[2]);
 
-function DeskSidebar() {
-  const desk = useAgentState<DeskView>(EMPTY_VIEW);
+  function toggleReason(reason: string) {
+    setReasons((current) =>
+      current.includes(reason)
+        ? current.filter((r) => r !== reason)
+        : current.length < 2
+          ? [...current, reason]
+          : current,
+    );
+  }
+
   return (
-    <div className="flex flex-col gap-6 p-4 text-aai-text">
-      <Section title="Tonight">
-        <Row label="In house" value={String(desk.inHouse)} />
-        <Row label="Arriving today" value={String(desk.arrivingToday)} />
-      </Section>
-
-      <Section title="Verified guest">
-        {desk.verified ? (
-          <div className="rounded-lg bg-aai-surface p-3 flex flex-col gap-1">
-            <Row label="Guest" value={desk.verified.name} />
-            <Row label="Booking" value={desk.verified.code} />
-            <Row label="Room" value={desk.verified.room} />
-            <Row label="Stay" value={desk.verified.stay} />
-            <Row label="Status" value={desk.verified.status} />
-          </div>
-        ) : (
-          <p className="text-sm opacity-50">No one verified on this call.</p>
-        )}
-      </Section>
-
-      <Section
-        title={desk.draft?.mode === "modify" ? "Modifying a booking" : "Booking in progress"}
+    <CenterCard wide>
+      <Heading title="Which call would you rather have had?">
+        Everything you experienced counts — the voice, the speed, and whether it got your details
+        right.
+      </Heading>
+      <form
+        className="flex flex-col gap-8"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!ready) return;
+          setBusy(true);
+          setError(null);
+          post<Progress>("/api/responses", {
+            participant,
+            session: view.session,
+            preference,
+            reasons,
+            ...(comment.trim() ? { comment: comment.trim() } : {}),
+            call1: ratings[1],
+            call2: ratings[2],
+          })
+            .then(onDone)
+            .catch((cause: Error) => setError(cause.message))
+            .finally(() => setBusy(false));
+        }}
       >
-        {desk.draft ? (
-          <div className="rounded-lg bg-aai-surface p-3 flex flex-col gap-1">
-            <Row label="Stay" value={desk.draft.stay} />
-            <Row label="Room" value={desk.draft.room} />
-            <Row label="Extras" value={desk.draft.extras} />
-            <Row label="Guest" value={desk.draft.guest} />
-            <Row label="Card" value={desk.draft.card} />
-            <Row label="Total" value={desk.draft.total} />
-          </div>
-        ) : (
-          <p className="text-sm opacity-50">No booking flow open.</p>
-        )}
-      </Section>
-
-      <Section title="Written this call">
-        {desk.ledger.length === 0 ? (
-          <p className="text-sm opacity-50">Nothing yet.</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {desk.ledger.map((t) => (
-              <li
-                key={t.code}
-                className="rounded-lg bg-aai-surface p-2 text-xs flex flex-col gap-0.5"
+        <fieldset className="flex flex-col gap-3">
+          <legend className="mb-3 font-semibold">
+            Overall, which agent would you rather talk to on a call like this?
+          </legend>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
+            {PREFERENCE.map((option) => (
+              <label
+                key={option.value}
+                className={`flex cursor-pointer items-center justify-center rounded-lg border px-2 py-3 text-center text-sm ${preference === option.value ? "border-aai-primary bg-aai-primary text-aai-bg" : "border-aai-border"}`}
               >
-                <div className="flex justify-between gap-2">
-                  <span
-                    className={
-                      t.kind === "emergency"
-                        ? "font-bold text-red-400"
-                        : "font-bold text-aai-primary"
-                    }
-                  >
-                    {KIND_LABELS[t.kind]}
-                  </span>
-                  <span className="opacity-60 font-mono">{t.code}</span>
-                </div>
-                <span className="opacity-80">{t.summary}</span>
-              </li>
+                <input
+                  type="radio"
+                  name="preference"
+                  checked={preference === option.value}
+                  onChange={() => setPreference(option.value)}
+                  className="sr-only"
+                />
+                {option.label}
+              </label>
             ))}
-          </ul>
-        )}
-      </Section>
-    </div>
+          </div>
+        </fieldset>
+
+        <fieldset className="flex flex-col gap-2">
+          <legend className="mb-3 font-semibold">
+            Why? Pick up to two <span className="font-normal opacity-60">(optional)</span>
+          </legend>
+          {REASONS.map((reason) => (
+            <label key={reason.value} className="flex items-center gap-3 text-sm">
+              <input
+                type="checkbox"
+                checked={reasons.includes(reason.value)}
+                disabled={!reasons.includes(reason.value) && reasons.length >= 2}
+                onChange={() => toggleReason(reason.value)}
+              />
+              {reason.label}
+            </label>
+          ))}
+          <textarea
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            maxLength={2000}
+            rows={2}
+            placeholder="Anything else? (optional)"
+            className="mt-2 rounded-lg border border-aai-border bg-aai-bg px-3 py-2 text-sm text-aai-text outline-none focus:border-aai-primary"
+          />
+        </fieldset>
+
+        {([1, 2] as const).map((position) => (
+          <fieldset key={position} className="flex flex-col gap-5">
+            <legend className="mb-3 font-semibold">Call {position}</legend>
+            {RATING_QUESTIONS.map((q) => (
+              <div key={q.key} className="flex flex-col gap-2">
+                <span className="text-sm">{q.question}</span>
+                <Scale
+                  name={`call${position}-${q.key}`}
+                  value={ratings[position][q.key]}
+                  onChange={(value) =>
+                    setRatings((current) => ({ ...current, [position]: { ...current[position], [q.key]: value } }))
+                  }
+                  low={q.low}
+                  high={q.high}
+                />
+              </div>
+            ))}
+          </fieldset>
+        ))}
+
+        <ErrorLine error={error} />
+        <Button type="submit" disabled={!ready || busy}>
+          Send answers
+        </Button>
+      </form>
+    </CenterCard>
   );
 }
 
 // ---------------------------------------------------------------------------
-// The app: name gate → call → survey, in order.
+// The app.
 // ---------------------------------------------------------------------------
 
-/** Which of the three screens a visit is on. */
-type Phase = "gate" | "call" | "survey" | "done";
+type Screen =
+  | { kind: "loading" }
+  | { kind: "signin" }
+  | { kind: "home"; progress: Progress }
+  | { kind: "brief"; view: SessionView; call: number }
+  | { kind: "call"; view: SessionView; call: number; attempt: number }
+  | { kind: "dropped"; view: SessionView; call: number; attempt: number }
+  | { kind: "questionnaire"; view: SessionView }
+  | { kind: "closed"; progress: Progress };
 
 function StudyApp() {
-  const session = useSession();
-  const callId = useCallId();
-  const [name, setName] = useState("");
-  // The call id this visit's survey will carry. Latched when the server sends it
-  // and kept after `end()` clears the live one, so the survey of the just-ended
-  // call still has its id.
-  const [surveyCallId, setSurveyCallId] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>("gate");
+  const [participant, setParticipant] = useState<string | null>(rememberedParticipant);
+  const [screen, setScreen] = useState<Screen>({ kind: participant ? "loading" : "signin" });
+  const [error, setError] = useState<string | null>(null);
+  // Which calls of the current session were skipped; any skip closes it unanswered.
+  const skipped = useRef(new Set<string>());
 
-  // The id this visit's survey will carry. Latch it as soon as the server sends
-  // it, so it survives `end()` clearing the live session into the survey screen.
+  // A remembered participant: re-read their progress (the token alone is enough).
+  // Reading progress hands out nothing; a session is only created on Start.
   useEffect(() => {
-    if (phase === "call" && callId !== null) setSurveyCallId(callId);
-  }, [phase, callId]);
+    if (screen.kind !== "loading" || participant === null) return;
+    post<Progress>("/api/progress", { participant })
+      .then((progress) => setScreen({ kind: "home", progress }))
+      .catch(() => {
+        rememberParticipant(null);
+        setParticipant(null);
+        setScreen({ kind: "signin" });
+      });
+  }, [screen.kind, participant]);
 
-  // Deciding the call is OVER is the subtle part. The shipped controls only
-  // pause/resume (Stop/Resume) and clear (New Conversation) — none calls `end()`,
-  // and a dialog reaching its `final` state stops the agent talking without
-  // closing the socket. So "the call is live, now it is not" is ambiguous:
-  // `state === "disconnected"` is equally a pause. The reliable signal is an
-  // EXPLICIT end, which the "End call & rate the voice" button below is — it calls
-  // `session.end()` and advances here. The one non-deliberate end we still honour
-  // is a FATAL error (a dropped call): the caller should still get to rate what
-  // they heard rather than being stranded on a dead chat view.
-  const fatal = session.error?.fatal ?? false;
-  useEffect(() => {
-    if (phase === "call" && fatal && (surveyCallId ?? callId) !== null) {
-      setPhase("survey");
+  function openSession(view: SessionView) {
+    skipped.current = new Set(view.calls.filter((call) => call.skipped).map((call) => call.token));
+    const next = view.calls.findIndex((call) => !call.done);
+    if (next === -1) afterCall(view, view.calls.length - 1);
+    else setScreen({ kind: "brief", view, call: next });
+  }
+
+  function startSession() {
+    if (participant === null) return;
+    setError(null);
+    post<SessionView>("/api/sessions", { participant })
+      .then(openSession)
+      .catch((cause: Error) => setError(cause.message));
+  }
+
+  /** After a call is over (ended or skipped): the next call, or the end of the session. */
+  function afterCall(view: SessionView, call: number) {
+    if (call + 1 < view.calls.length) {
+      setScreen({ kind: "brief", view, call: call + 1 });
+      return;
     }
-  }, [phase, fatal, surveyCallId, callId]);
+    if (skipped.current.size > 0 && participant !== null) {
+      post<Progress>("/api/sessions/close", { participant, session: view.session })
+        .then((progress) => setScreen({ kind: "closed", progress }))
+        .catch((cause: Error) => setError(cause.message));
+      return;
+    }
+    setScreen({ kind: "questionnaire", view });
+  }
 
-  if (phase === "gate") {
+  function skip(view: SessionView, call: number) {
+    const token = view.calls[call]?.token;
+    if (token) {
+      skipped.current.add(token);
+      reportCall(token, "skipped");
+    }
+    afterCall(view, call);
+  }
+
+  if (screen.kind === "loading") return <CenterCard>Loading…</CenterCard>;
+
+  if (screen.kind === "signin") {
     return (
-      <NameGate
-        onStart={(entered) => {
-          setName(entered);
-          setSurveyCallId(null);
-          setPhase("call");
-          session.start();
+      <SignIn
+        onSignedIn={(progress) => {
+          setParticipant(progress.participant);
+          setScreen({ kind: "home", progress });
         }}
       />
     );
   }
 
-  if (phase === "call") {
-    const haveId = (surveyCallId ?? callId) !== null;
+  if (screen.kind === "home" || screen.kind === "closed") {
+    const { progress } = screen;
     return (
-      <SidebarLayout sidebar={<DeskSidebar />} sidebarWidth="22rem">
-        <div className="flex h-full flex-col">
-          <div className="min-h-0 flex-1">
-            <ChatView />
-          </div>
-          <footer className="flex justify-center border-t border-aai-border bg-aai-surface p-3">
-            <button
-              type="button"
-              disabled={!haveId}
-              onClick={() => {
-                session.end();
-                setPhase("survey");
-              }}
-              className="rounded-lg bg-aai-primary px-4 py-2.5 text-base font-semibold text-aai-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              End call &amp; rate the voice
-            </button>
-          </footer>
-        </div>
-      </SidebarLayout>
+      <CenterCard>
+        <Heading title={progress.canContinue ? "Ready for a session?" : "All done — thank you"}>
+          {screen.kind === "closed" && <p className="mb-2">That session had a call that didn't work, so we've set it aside.</p>}
+          {progress.canContinue
+            ? `You've finished ${progress.completed} of ${progress.total} sessions. Each one is two short calls and a few questions. Doing more sessions helps the most.`
+            : `You've finished all ${progress.total} sessions. Thanks for your help.`}
+        </Heading>
+        <ErrorLine error={error} />
+        {progress.canContinue && (
+          <Button onClick={startSession}>
+            {progress.open ? "Resume" : "Start"} session {progress.completed + 1}
+          </Button>
+        )}
+        <Button
+          kind="quiet"
+          onClick={() => {
+            rememberParticipant(null);
+            setParticipant(null);
+            setScreen({ kind: "signin" });
+          }}
+        >
+          Not you? Sign out
+        </Button>
+      </CenterCard>
     );
   }
 
-  if (phase === "survey") {
-    const id = surveyCallId ?? callId;
-    // `id` is non-null here: the call phase disables End until an id exists and
-    // the fatal-error path checks for one. The guard satisfies the compiler and
-    // is a safe fallback if that ever changes.
-    if (id === null) {
-      setPhase("gate");
-      return null;
-    }
-    return <Survey name={name} callId={id} onDone={() => setPhase("done")} />;
+  if (screen.kind === "brief") {
+    const { view, call } = screen;
+    const current = view.calls[call];
+    if (!current) return null;
+    return (
+      <CenterCard>
+        <Heading title={`Session ${view.index} of ${view.total} · Call ${call + 1} of 2`}>
+          You're phoning the Harborlight Hotel to book a room. Play the person on this card — give
+          your name, spell your last name, and give the night and address when asked. You don't need
+          to read it word for word.
+        </Heading>
+        <PersonaCard card={current.card} />
+        <Button onClick={() => setScreen({ kind: "call", view, call, attempt: 1 })}>
+          Start call {call + 1}
+        </Button>
+      </CenterCard>
+    );
+  }
+
+  if (screen.kind === "call") {
+    const { view, call, attempt } = screen;
+    const current = view.calls[call];
+    if (!current) return null;
+    return (
+      <LiveCall
+        key={`${current.token}-${attempt}`}
+        call={current}
+        label={`Call ${call + 1} of 2`}
+        onEnded={() => {
+          reportCall(current.token, "completed");
+          afterCall(view, call);
+        }}
+        onDropped={() => {
+          reportCall(current.token, "dropped");
+          setScreen({ kind: "dropped", view, call, attempt });
+        }}
+        onSkipped={() => skip(view, call)}
+      />
+    );
+  }
+
+  if (screen.kind === "dropped") {
+    const { view, call, attempt } = screen;
+    return (
+      <CenterCard>
+        <Heading title="The call dropped">
+          Sorry about that. You can try the call again from the start, or skip it if it keeps
+          failing.
+        </Heading>
+        <div className="flex flex-wrap justify-between gap-3">
+          <Button kind="quiet" onClick={() => skip(view, call)}>
+            Skip this call
+          </Button>
+          <Button onClick={() => setScreen({ kind: "call", view, call, attempt: attempt + 1 })}>
+            Try again
+          </Button>
+        </div>
+      </CenterCard>
+    );
   }
 
   return (
-    <CenterCard>
-      <header className="flex flex-col gap-2">
-        <h1 className="text-balance text-2xl font-bold">Thank you</h1>
-        <p className="text-pretty text-sm leading-relaxed opacity-70">
-          Your answers are saved. Thanks for helping us choose a voice, {name}.
-        </p>
-      </header>
-      <button
-        type="button"
-        onClick={() => {
-          setName("");
-          setSurveyCallId(null);
-          setPhase("gate");
-        }}
-        className="rounded-lg bg-aai-primary px-4 py-2.5 text-base font-semibold text-aai-bg"
-      >
-        Take another call
-      </button>
-    </CenterCard>
+    <Questionnaire
+      participant={participant ?? ""}
+      view={screen.view}
+      onDone={(progress) => setScreen({ kind: "home", progress })}
+    />
   );
 }
 
 mountClient({
   component: StudyApp,
-  name: "The Harborlight Hotel",
-  onSessionId: setCurrentCallId,
+  name: "Hotel desk listening test",
+  WebSocket: CallSocket,
   theme: {
     bg: "#101418",
     primary: "#c8a96e",
