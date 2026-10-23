@@ -3,13 +3,13 @@ import agentDef from "virtual:aai/agent";
 import type { SessionEvent, ToolContext } from "@alexkroman1/aai";
 import { createToolContext } from "@alexkroman1/aai/testing";
 import { describe, expect, test } from "vitest";
-import { deskFlow } from "./desk.ts";
+import { deskFlow, SCRIPT_INSTRUCTION, SCRIPT_STEPS, SCRIPT_TEMPERATURE } from "./desk.ts";
 
-// The simplified voice-study agent: no tools, no booking state machine, no hotel
-// domain. Its whole behaviour is the fixed eight-step booking script in
-// `desk.ts`, driven one turn at a time by the caller's replies. So these specs
-// cover exactly two things — that the deployed agent is that shape, and that the
-// script's states advance in order and stay speak-only.
+// The blind-test agent: no tools, no booking state machine, no hotel domain.
+// Its whole behaviour is the fixed seven-step booking script in `desk.ts`, run as
+// ONE speak-only instruction the model follows from the conversation. So these
+// specs cover the deployed agent's shape, the held-constant voice knobs, and
+// that the script state stays put on caller turns and ends on a hang-up.
 
 // ─── Harness ─────────────────────────────────────────────────────────────────
 
@@ -47,71 +47,42 @@ describe("the deployed agent", () => {
   });
 });
 
+// ─── Held constant across every system ───────────────────────────────────────
+
+describe("the voice knobs the protocol holds constant", () => {
+  test("temperature 0.2, dead-air filler off, barge-in needs two words", () => {
+    expect(agentDef.temperature).toBe(0.2);
+    expect(agentDef.deadAirCoverMs).toBe(0);
+    expect(agentDef.minBargeInWords).toBe(2);
+  });
+});
+
 // ─── The fixed booking script ────────────────────────────────────────────────
 
 describe("the fixed booking script", () => {
-  // The eight steps of docs/tts-preference-plan.md, one agent turn per state.
-  // Step 1 (hello + "ready to book?") is the agent.ts greeting, before the
-  // dialog; the script opens on the caller's answer to it and runs to goodbye.
-  const SCRIPT = [
-    "call.ready",
-    "call.readName",
-    "call.readNight",
-    "call.readAddress",
-    "call.theTwist",
-    "call.farewell",
-  ] as const;
-
-  test("a fresh call opens on the first step, speaking only", () => {
+  test("a fresh call opens on the one script state, speak-only and steady", () => {
     const ctx = createToolContext();
-    expect(at(ctx)).toBe("call.ready");
+    expect(at(ctx)).toBe("call.script");
     expect(deskFlow.voiceConfig(ctx)?.toolChoice).toBe("none");
+    expect(deskFlow.voiceConfig(ctx)?.temperature).toBe(SCRIPT_TEMPERATURE);
   });
 
-  test("each caller turn advances one step, in order, through to the goodbye", () => {
+  test("the instruction lists all seven steps and the next-step-not-done rule", () => {
+    expect(SCRIPT_STEPS).toHaveLength(7);
+    for (const step of SCRIPT_STEPS) expect(SCRIPT_INSTRUCTION).toContain(step);
+    expect(SCRIPT_INSTRUCTION).toMatch(/NEXT step not yet done/);
+    expect(SCRIPT_INSTRUCTION).toMatch(/re-ask/);
+  });
+
+  test("a caller turn does not push the script ahead — the model tracks progress", () => {
     const ctx = createToolContext();
-    const walked = [at(ctx)];
-    for (let i = 1; i < SCRIPT.length; i++) walked.push(callerAnswers(ctx));
-    expect(walked).toEqual(SCRIPT);
+    for (let i = 0; i < 10; i++) expect(callerAnswers(ctx)).toBe("call.script");
   });
 
-  test("every speaking turn hands the model no tools, so the script cannot wander into one", () => {
-    const ctx = createToolContext();
-    for (const state of SCRIPT) {
-      expect(at(ctx)).toBe(state);
-      expect(deskFlow.voiceConfig(ctx)?.toolChoice, state).toBe("none");
-      if (state !== SCRIPT.at(-1)) callerAnswers(ctx);
-    }
-  });
-
-  test("the read-back turns ask for a steady voice; the opener and the goodbye leave it default", () => {
-    const ctx = createToolContext();
-    // ready (the opener): no temperature override.
-    expect(deskFlow.voiceConfig(ctx)?.temperature).toBeUndefined();
-    // The four read-back turns — a spelled name, a night, an address, the
-    // name-and-city twist — each ask for the steadier voice.
-    for (const steady of ["call.readName", "call.readNight", "call.readAddress", "call.theTwist"]) {
-      expect(callerAnswers(ctx)).toBe(steady);
-      expect(deskFlow.voiceConfig(ctx)?.temperature, steady).toBe(0.2);
-    }
-    // farewell (the goodbye): nothing to read back, so back to the default.
-    expect(callerAnswers(ctx)).toBe("call.farewell");
-    expect(deskFlow.voiceConfig(ctx)?.temperature).toBeUndefined();
-  });
-
-  test("the goodbye is the end: farewell is final and a further turn does not run past it", () => {
-    const ctx = createToolContext();
-    for (let i = 1; i < SCRIPT.length; i++) callerAnswers(ctx);
-    expect(at(ctx)).toBe("call.farewell");
-    expect(callerAnswers(ctx)).toBe("call.farewell");
-  });
-
-  test("a hang-up mid-script ends the call on hungUp, and nothing advances after", () => {
+  test("a hang-up ends the call on hungUp, and nothing restarts it", () => {
     const ctx = createToolContext();
     callerAnswers(ctx);
-    expect(at(ctx)).toBe("call.readName");
     expect(deskFlow.receive(ctx, CALLER_GONE).state).toBe("hungUp");
-    // The caller is gone; a stray transcript cannot restart the script.
     expect(callerAnswers(ctx)).toBe("hungUp");
   });
 });
