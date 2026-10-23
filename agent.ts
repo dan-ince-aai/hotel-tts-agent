@@ -1,5 +1,5 @@
 import { agent } from "@alexkroman1/aai";
-import { DIALOGS } from "./desk.ts";
+import { DIALOGS, SCRIPT_TEMPERATURE } from "./desk.ts";
 import systemPrompt from "./system-prompt.md?raw";
 import { SYSTEMS, type System, VOICE_NAMES, type VoiceName } from "./study/design.ts";
 import { resolveCell, ttsForCell, type VoiceCell } from "./voices.ts";
@@ -35,6 +35,17 @@ export default agent({
    */
   dialogs: DIALOGS,
   systemPrompt,
+  // Held constant for every system under test (see the protocol, "Held
+  // constant"). The script state also pins this; setting it here covers the
+  // greeting-adjacent turns too.
+  temperature: SCRIPT_TEMPERATURE,
+  // Dead-air filler OFF: when the LLM stalls, every system gets the same
+  // silence. A filler would be spoken by the system under test, so a stall would
+  // become extra speech for one model and not another.
+  deadAirCoverMs: 0,
+  // An "okay" must not cut a read-back short. Two words is the SDK default;
+  // pinned here because the study depends on it.
+  minBargeInWords: 2,
   // Declared so a deploy fails fast if the key the LLM/STT/TTS stages read is
   // missing, rather than mid-call. Provider rows add their own keys in voices.ts.
   requiredEnv: ["ASSEMBLYAI_API_KEY"],

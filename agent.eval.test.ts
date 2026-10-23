@@ -3,8 +3,8 @@ import agentDef from "virtual:aai/agent";
 // An EVAL for the voice-study desk: does the MODEL stay on the fixed booking
 // script?
 //
-// `agent.test.ts` drives the dialog directly — it proves the script's states
-// advance in order and that every turn is speak-only. What no direct test can
+// `agent.test.ts` drives the dialog directly — it proves the script is one
+// speak-only instruction that a caller turn cannot push ahead. What no direct test can
 // settle is whether the live model, handed a real caller, actually walks the
 // script to the end and reads each detail back. That is what this file is for.
 // The agent has no tools, so "stayed on the script" is simply "called nothing".
@@ -55,6 +55,49 @@ describeEval(agentDef, (test) => {
           "already have your card on file. How are you doing today, Jane?",
         "Wonderful to hear. This night is on us, completely free, and we look forward to seeing " +
           "you on Friday. Take care - goodbye!",
+      ],
+    },
+  );
+
+  test(
+    "an untidy caller does not push the script ahead of the conversation",
+    async ({ session }) => {
+      // The protocol's messy caller: a "hello?" while the agent is slow, an
+      // "okay" mid-step, and a spelling given in two breaths. Each commits a turn
+      // that completes nothing, so the read-backs must still come out right.
+      const turns = await session.sayAll([
+        "Hello?",
+        "Yes, ready.",
+        "Jennifer Thompson. T, H, O, M...",
+        "...P, S, O, N.",
+        "Okay.",
+        "Sunday, March twenty-first.",
+        "1847 Maple Ridge Drive, apartment 4B, Columbus, Ohio, 43215.",
+        "Yes.",
+        "Great, thanks.",
+      ]);
+      const said = turns.map((turn) => turn.text).join("\n");
+
+      expect(toolNames(toolCallsInTurns(turns))).toEqual([]);
+      // The full spelling came back, not the half given in the first breath.
+      expect(said).toMatch(/T-?H-?O-?M-?P-?S-?O-?N/i);
+      expect(said).toMatch(/March 21/i);
+      expect(said).toMatch(/1847/);
+      expect(said).toMatch(/43215/);
+    },
+    {
+      stubReply: [
+        "Hi, yes, I'm here - are you ready to book a room with us?",
+        "Wonderful - may I have your full name, and could you spell your last name for me?",
+        "Thank you - and the rest of the spelling?",
+        "Jennifer Thompson, T-H-O-M-P-S-O-N. Which night would you like to stay?",
+        "Which night would you like to stay with us?",
+        "Sunday, March 21st - lovely. What's your full street address?",
+        "That's 1847 Maple Ridge Dr, Apt 4B, Columbus, OH 43215 - is that right?",
+        "Oh, Jennifer - you're one of our regulars, and we already have your card on file. How " +
+          "are you doing today?",
+        "So glad to hear it. Your night is on the house, completely free - we look forward to " +
+          "seeing you. Goodbye!",
       ],
     },
   );
