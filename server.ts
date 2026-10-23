@@ -13,6 +13,8 @@
  *   looked up in the store and the socket handed to the engine for that call's
  *   cell. The browser never names a system or a voice; it only ever holds the
  *   token, so nothing on the page can say which call was ours.
+ * - **`GET /api/export/{sessions,calls}.csv`** — the data, behind
+ *   `STUDY_ADMIN_TOKEN` (`study/export.ts`); off when the token is unset.
  * - the page itself (`client.tsx`, built into `.aai/client`).
  *
  * ## Why this is a file rather than `aai start`
@@ -39,8 +41,10 @@
  * call). Everything else the setup-failure rule needs is recorded here, from the
  * runtime: a socket CONNECTED for the call (each retry is another attempt), the
  * voice SPOKE (a reply produced first audio), a FATAL error and whether it was
- * the TTS, and every reply's four speed numbers.
+ * the TTS, every reply's four speed numbers, and each side's committed words
+ * (the read-back check reads the agent's).
  */
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { existsSync, readFileSync } from "node:fs";
@@ -63,6 +67,7 @@ import { WebSocketServer } from "ws";
 import { registerElevenLabsTts } from "./elevenlabs-tts-host.ts";
 import { registerInworldTts } from "./inworld-tts-host.ts";
 import { ApiError, StudyApi } from "./study/api.ts";
+import { CALL_COLUMNS, callRows, SESSION_COLUMNS, sessionRows, toCsv } from "./study/export.ts";
 import { MemoryStore, PostgresStore, type StudyStore, turnTimings } from "./study/store.ts";
 import { gridOptionsFromEnv, resolveGrid, ttsForCell, type VoiceCell } from "./voices.ts";
 
@@ -119,9 +124,10 @@ function logFailure(what: string) {
  * failure named: the study compares the same voice across four models, so a grid
  * with a hole in it is not the study.
  *
- * Each engine's agent carries one event hook: a FATAL error is recorded against
- * the call, flagged as a TTS failure when that is what it was. The analysis
- * scores fatal TTS errors as losses in a sensitivity fit, so it needs to know.
+ * Each engine's agent carries the study's event hooks: a FATAL error is recorded
+ * against the call, flagged as a TTS failure when that is what it was (the
+ * analysis scores fatal TTS errors as losses in a sensitivity fit), and each
+ * side's committed words are saved for the read-back check.
  */
 function buildEngines(
   base: AgentDef,
@@ -131,8 +137,17 @@ function buildEngines(
 ): Engine[] {
   const engines: Engine[] = [];
   const failures: string[] = [];
+  const saveWords = (role: "agent" | "caller") => (event: { text: string }, ctx: { sessionId: string }) => {
+    const token = callForRuntime.get(ctx.sessionId);
+    if (token === undefined || event.text.trim() === "") return;
+    store
+      .recordUtterance(ctx.sessionId, { callToken: token, role, text: event.text })
+      .catch(logFailure(`transcript save for ${token}`));
+  };
   const events: AgentDef["events"] = {
     ...base.events,
+    "agent-transcript.committed": saveWords("agent"),
+    "user-transcript.committed": saveWords("caller"),
     "error.reported": (event, ctx) => {
       if (!event.fatal) return;
       const token = callForRuntime.get(ctx.sessionId);
@@ -305,6 +320,57 @@ function handleApi(routes: ReturnType<typeof apiRoutes>) {
   };
 }
 
+/** Constant-time token comparison, so the export token cannot be timed out. */
+function tokenMatches(presented: string, expected: string): boolean {
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * `GET /api/export/sessions.csv` (the analysis input) and `/api/export/calls.csv`
+ * (per call, with transcripts). The token comes as `Authorization: Bearer …` or
+ * `?token=…`; `?all=1` includes rehearsal and smoke-test rows, marked. With no
+ * `STUDY_ADMIN_TOKEN` set the routes do not exist.
+ */
+function handleExport(store: StudyStore, adminToken: string | undefined) {
+  return (req: IncomingMessage, res: ServerResponse, url: string, method: string): boolean => {
+    // The hook's `url` is the path; the query string is only on `req.url`.
+    const parsed = new URL(req.url ?? url, "http://localhost");
+    const kind = { "/api/export/sessions.csv": "sessions", "/api/export/calls.csv": "calls" }[parsed.pathname];
+    if (kind === undefined) return false;
+    if (!adminToken) {
+      sendJson(res, 404, { error: "export is off: set STUDY_ADMIN_TOKEN" });
+      return true;
+    }
+    const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
+    if (method !== "GET" || !tokenMatches(bearer ?? parsed.searchParams.get("token") ?? "", adminToken)) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return true;
+    }
+    const options = { includeAll: parsed.searchParams.get("all") === "1" };
+    store
+      .dump()
+      .then((dump) => {
+        const csv =
+          kind === "sessions"
+            ? toCsv(SESSION_COLUMNS, sessionRows(dump, options))
+            : toCsv(CALL_COLUMNS, callRows(dump, options));
+        res.writeHead(200, {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="${kind}.csv"`,
+          "cache-control": "no-store",
+        });
+        res.end(csv);
+      })
+      .catch((error: unknown) => {
+        console.error("[study] export failed:", error);
+        if (!res.headersSent) sendJson(res, 500, { error: "export failed" });
+      });
+    return true;
+  };
+}
+
 async function openStore(databaseUrl: string | undefined): Promise<StudyStore> {
   if (databaseUrl) {
     const store = await PostgresStore.open(databaseUrl);
@@ -374,13 +440,16 @@ async function main(): Promise<void> {
   });
 
   const api = new StudyApi({ store, grid: gridOptions, studySeed: env.STUDY_SEED ?? "harborlight" });
+  const exportRoutes = handleExport(store, env.STUDY_ADMIN_TOKEN);
+  const studyRoutes = handleApi(apiRoutes(api));
   const server = createRuntimeServer({
     runtime: enginesRuntime(built),
     name: base.name,
     greeting: base.greeting,
     clientDir: resolveClientDir(cwd),
     upgrade: routeCalls(engines, store),
-    request: handleApi(apiRoutes(api)),
+    request: (req, res, url, method) =>
+      exportRoutes(req, res, url, method) || studyRoutes(req, res, url, method),
   });
 
   const port = Number(process.env.PORT ?? DEFAULT_START_PORT);
