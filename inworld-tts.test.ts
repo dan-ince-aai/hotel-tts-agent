@@ -105,11 +105,12 @@ class FakeWebSocket extends EventTarget {
   readonly sent: Record<string, unknown>[] = [];
   readyState = 0;
   closedWith: number | undefined;
-  constructor(
-    readonly url: string,
-    readonly init: { headers: Record<string, string> },
-  ) {
+  readonly url: string;
+  readonly init: { headers: Record<string, string> };
+  constructor(url: string, init: { headers: Record<string, string> }) {
     super();
+    this.url = url;
+    this.init = init;
     FakeWebSocket.instances.push(this);
     setTimeout(() => {
       this.readyState = 1;
