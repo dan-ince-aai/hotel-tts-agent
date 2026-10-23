@@ -1,5 +1,5 @@
 /**
- * Phase 3 proof: the four ElevenLabs engines answer, speaking with the real
+ * Proof the ElevenLabs clones answer, speaking with the real
  * ElevenLabs service. A script rather than a spec because it spends money and
  * needs `ELEVENLABS_API_KEY` — `aai test` runs every other `*.test.ts` on every
  * run, and this should not. It is the ElevenLabs analogue of `npm run eval`.
@@ -8,13 +8,14 @@
  *
  *   node elevenlabs-smoke.ts
  *
- * For each ElevenLabs row in `voices.ts` it opens the connector against the live
+ * For each ElevenLabs clone in the `voices.ts` grid it opens the connector against the live
  * service, speaks one line, flushes, and counts the PCM it got back. A voice id
  * ElevenLabs does not know connects, reports ready, then stays silent — so zero
  * audio for any voice fails the run loudly, which is the whole point.
  */
 import { readFileSync } from "node:fs";
-import { VOICES } from "./voices.ts";
+import { SYSTEM_MODEL, VOICE_IDS } from "./voices.ts";
+import { VOICE_NAMES } from "./study/design.ts";
 import { openElevenLabs, registerElevenLabsTts } from "./elevenlabs-tts-host.ts";
 import { resolveElevenLabsTtsSettings } from "./elevenlabs-tts.ts";
 
@@ -45,9 +46,9 @@ interface VoiceResult {
   readonly error: string | undefined;
 }
 
-async function speakOnce(apiKey: string, voice: string): Promise<VoiceResult> {
+async function speakOnce(apiKey: string, voice: string, model: string): Promise<VoiceResult> {
   const controller = new AbortController();
-  const opener = openElevenLabs({ voice });
+  const opener = openElevenLabs({ voice, model });
   const session = await opener.open({
     sampleRate: SAMPLE_RATE,
     apiKey,
@@ -97,15 +98,18 @@ async function main(): Promise<void> {
   }
   unregister();
 
-  const rows = VOICES.filter((row) => row.provider === "elevenlabs");
+  const rows = VOICE_NAMES.flatMap((name) =>
+    VOICE_IDS[name].elevenlabs === "" ? [] : [{ label: name, voice: VOICE_IDS[name].elevenlabs }],
+  );
+  if (rows.length === 0) throw new Error("voices.ts has no ElevenLabs clone ids yet.");
   console.log(`Speaking one line through ${rows.length} ElevenLabs voices at ${SAMPLE_RATE} Hz…\n`);
 
   const results: VoiceResult[] = [];
   for (const row of rows) {
-    const model = resolveElevenLabsTtsSettings({ voice: row.voice }).model;
+    const model = resolveElevenLabsTtsSettings({ voice: row.voice, model: SYSTEM_MODEL.elevenlabs }).model;
     process.stdout.write(`  ${row.label}  ${row.voice}  (${model})  … `);
     try {
-      const result = { ...(await speakOnce(apiKey, row.voice)), label: row.label };
+      const result = { ...(await speakOnce(apiKey, row.voice, model)), label: row.label };
       results.push(result);
       const seconds = (result.samples / SAMPLE_RATE).toFixed(2);
       console.log(

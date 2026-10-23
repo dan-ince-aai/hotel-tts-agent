@@ -2,21 +2,20 @@
  * The routing server for the voice-preference study (Phase 4 of
  * `docs/tts-preference-build-plan.md`).
  *
- * The study runs twelve copies of the one hotel agent — the same tools, the same
- * prompt, the same booking flow — that differ in NOTHING but the voice. This
- * server builds the hotel agent once, stands up one engine per voice row, and
- * hands each incoming call to the next engine in an even rotation, so over many
- * callers the twelve voices stay balanced. It remembers which voice each call
+ * The study runs sixteen copies of the one hotel agent — the same prompt, the
+ * same booking script — that differ in NOTHING but the voice cell. This server
+ * builds the hotel agent once, stands up one engine per cell, and hands each
+ * incoming call to the next engine in an even rotation. It remembers which voice each call
  * got (keyed by the session id, which is the call id the survey will carry) and
  * serves the page the project already builds.
  *
  * ## Why this is a file rather than `aai start`
  *
  * `aai start` serves ONE agent — one voice. The study needs one front door that
- * fans out to twelve. There is no single-agent knob for that, so this owns the
+ * fans out to sixteen. There is no single-agent knob for that, so this owns the
  * boot: it loads the SAME built worker `aai start` would (`loadBuiltAgent`, the
  * `.aai/worker.mjs` artifact with its tools and prompt lowered in), then wraps
- * twelve runtimes built from it behind one {@link SessionRuntime} facade and
+ * sixteen runtimes built from it behind one {@link SessionRuntime} facade and
  * serves that with `createRuntimeServer`. Everything below the routing — the
  * session, the pipeline, the client config, the static client — is the
  * framework's, unchanged.
@@ -25,18 +24,14 @@
  * runs this. `PORT` and `HOST` are read the way `aai start` reads them, so the
  * Render setup in Phase 9 needs nothing new.
  *
- * ## ElevenLabs is wired in (Phase 8)
+ * ## Sixteen engines, or none
  *
- * Phases 3 and 4 were built in parallel: Phase 3 built the ElevenLabs connector
- * (`elevenlabs-tts-host.ts`), Phase 4 built this server. Phase 8 joins them —
- * `main()` calls `registerElevenLabsTts()` before building any engine, so the
- * four `elevenlabs` rows resolve and speak like any other row and all twelve
- * engines stand up. The resolution is eager (per the runtime, a voice agent
- * resolves its TTS opener at `createRuntime` time, not at first call), which is
- * exactly why the registration has to happen first. `buildEngines` still catches
- * a row that fails to resolve and skips it with a note, so a bad key or a missing
- * registration degrades to the engines that did build rather than taking the
- * whole server down.
+ * The engines are the voice grid (`voices.ts`): four cloned voices in each of
+ * four systems. ElevenLabs and Inworld are this project's own connectors, so
+ * `main()` registers both before building any engine — a voice agent resolves
+ * its TTS opener eagerly at `createRuntime` time. A missing clone id or an
+ * engine that will not build stops the server with every failure named, rather
+ * than degrading to the cells that did build.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
@@ -58,6 +53,7 @@ import {
 import { registerMetricsSink } from "@alexkroman1/aai-runtime/metrics";
 import { defaultClientDir } from "@alexkroman1/aai-ui/client-dir";
 import { registerElevenLabsTts } from "./elevenlabs-tts-host.ts";
+import { registerInworldTts } from "./inworld-tts-host.ts";
 import {
   closeResultsDb,
   initResultsDb,
@@ -68,11 +64,11 @@ import {
   SurveyBodySchema,
   surveyInput,
 } from "./db.ts";
-import { ttsForRow, VOICES, type VoiceRow } from "./voices.ts";
+import { gridOptionsFromEnv, resolveGrid, ttsForCell, type VoiceCell } from "./voices.ts";
 
-/** One built voice: the row it speaks, and the runtime that speaks it. */
+/** One built voice cell: the cell it speaks, and the runtime that speaks it. */
 interface Engine {
-  readonly row: VoiceRow;
+  readonly cell: VoiceCell;
   readonly runtime: AgentRuntime;
 }
 
@@ -119,26 +115,23 @@ function resolveClientDir(cwd: string): string {
 }
 
 /**
- * Stand up one engine per voice row. A row whose provider cannot resolve — a
- * missing key, or an `elevenlabs` row reached before `registerElevenLabsTts` has
- * run — throws out of `createRuntime`'s eager provider resolution; that row is
- * skipped with a note rather than taking the whole server down. With the
- * ElevenLabs kind registered first (see `main`), all twelve rows resolve.
+ * Stand up one engine per voice cell — sixteen. Unlike the old per-row build,
+ * a cell that fails to resolve (a missing key, an unregistered provider) takes
+ * the server down with every failure named: the study compares the same voice
+ * across four models, so a grid with a hole in it is not the study.
  */
-function buildEngines(base: AgentDef, env: Record<string, string>): Engine[] {
+function buildEngines(base: AgentDef, env: Record<string, string>, cells: VoiceCell[]): Engine[] {
   const engines: Engine[] = [];
-  for (const row of VOICES) {
-    let runtime: AgentRuntime;
+  const failures: string[] = [];
+  for (const cell of cells) {
     try {
-      runtime = createRuntime({ agent: { ...base, tts: ttsForRow(row) }, env });
+      engines.push({ cell, runtime: createRuntime({ agent: { ...base, tts: ttsForCell(cell) }, env }) });
     } catch (error) {
-      console.warn(
-        `[study] skipping voice ${row.label} (${row.provider}): ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-      );
-      continue;
+      failures.push(`${cell.key} (${cell.provider}): ${error instanceof Error ? error.message : String(error)}`);
     }
-    engines.push({ row, runtime });
+  }
+  if (failures.length > 0) {
+    throw new Error(`${failures.length} voice engine(s) failed to build:\n  ${failures.join("\n  ")}`);
   }
   return engines;
 }
@@ -162,11 +155,11 @@ function buildEngines(base: AgentDef, env: Record<string, string>): Engine[] {
  * absent) just drop out of the later rounds.
  */
 function interleaveByProvider(engines: Engine[]): Engine[] {
-  const groups = new Map<VoiceRow["provider"], Engine[]>();
+  const groups = new Map<VoiceCell["system"], Engine[]>();
   for (const engine of engines) {
-    const group = groups.get(engine.row.provider) ?? [];
+    const group = groups.get(engine.cell.system) ?? [];
     group.push(engine);
-    groups.set(engine.row.provider, group);
+    groups.set(engine.cell.system, group);
   }
   const lists = [...groups.values()];
   const longest = Math.max(0, ...lists.map((list) => list.length));
@@ -210,14 +203,14 @@ function routingRuntime(engines: Engine[]): SessionRuntime {
         ...options,
         onSinkCreated: (sessionId, sink) => {
           engineForSession.set(sessionId, index);
-          callVoice.set(sessionId, engine.row.label);
+          callVoice.set(sessionId, engine.cell.key);
           console.info(
-            `[study] call ${sessionId} -> voice ${engine.row.label} ` +
-              `(${engine.row.provider}:${engine.row.voice})`,
+            `[study] call ${sessionId} -> cell ${engine.cell.key} ` +
+              `(${engine.cell.provider}:${engine.cell.voiceId ?? "stock"}, ${engine.cell.source})`,
           );
           // Save path #1: a `visitors` row at call start, carrying the voice this
           // call got. Fire-and-forget — a database hiccup must not fail the call.
-          recordVisitor(sessionId, engine.row.label).catch((error: unknown) => {
+          recordVisitor(sessionId, engine.cell.key).catch((error: unknown) => {
             console.error(`[study] visitor save failed for ${sessionId}:`, error);
           });
           options?.onSinkCreated?.(sessionId, sink);
@@ -293,25 +286,36 @@ async function main(): Promise<void> {
   const base = await loadBuiltAgent(cwd);
   const env = resolveAgentEnv(cwd);
 
-  // Plug in the Phase 3 ElevenLabs connector before building any engine. The
+  // Plug in this project's own TTS connectors before building any engine. The
   // runtime resolves a voice agent's TTS opener eagerly at `createRuntime` time,
-  // so the kind must be on the registry first or the four `elevenlabs` rows would
-  // be skipped. One registration serves every engine for the process's lifetime.
+  // so each kind must be on the registry first. One registration serves every
+  // engine for the process's lifetime.
   registerElevenLabsTts();
+  registerInworldTts();
 
-  const built = buildEngines(base, env);
-  if (built.length === 0) {
-    throw new Error(
-      "No voice engines built — every row in voices.ts failed to resolve. " +
-        "Check the provider keys in .env and that ttsForRow handles each provider.",
+  // Sixteen cells or nothing: resolveGrid names every missing clone at once, and
+  // buildEngines every engine that would not stand up.
+  const gridOptions = gridOptionsFromEnv(env);
+  const cells = resolveGrid(gridOptions);
+  if (gridOptions.oursStandIn) {
+    console.warn(
+      `[study] REHEARSAL: "ours" is spoken by ${gridOptions.oursStandIn} (STUDY_OURS_STANDIN). ` +
+        "Calls from this server are not study data.",
     );
   }
-  // Stripe the rotation across providers so consecutive calls change provider.
+  const stock = cells.filter((cell) => cell.source === "stock");
+  if (stock.length > 0) {
+    console.warn(
+      `[study] DEVELOPMENT: ${stock.length} cell(s) speak a stock voice, not a clone ` +
+        `(STUDY_ALLOW_MISSING_VOICES): ${stock.map((cell) => cell.key).join(", ")}.`,
+    );
+  }
+  const built = buildEngines(base, env, cells);
+  // Stripe the rotation across systems so consecutive calls change system.
   const engines = interleaveByProvider(built);
   console.info(
-    `[study] ${engines.length}/${VOICES.length} voices ready; rotation order ` +
-      `(providers interleaved): ` +
-      engines.map((e) => `${e.row.label}:${e.row.provider}`).join(" -> "),
+    `[study] ${engines.length}/${cells.length} voice engines ready; rotation order: ` +
+      engines.map((e) => e.cell.key).join(" -> "),
   );
   if (env.DATABASE_URL) {
     // With a URL set, the runtime picks the DURABLE Postgres session-state

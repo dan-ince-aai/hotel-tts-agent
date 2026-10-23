@@ -1,14 +1,16 @@
 import { agent } from "@alexkroman1/aai";
 import { DIALOGS } from "./desk.ts";
 import systemPrompt from "./system-prompt.md?raw";
-import { ttsForRow, VOICES, voiceByLabel, type VoiceRow } from "./voices.ts";
+import { SYSTEMS, type System, VOICE_NAMES, type VoiceName } from "./study/design.ts";
+import { resolveCell, ttsForCell, type VoiceCell } from "./voices.ts";
 
 /**
  * The Harborlight front desk, on the phone — but for the voice-preference study,
  * not as the open-ended receptionist the template ships. This agent walks every
- * caller through ONE fixed booking script (`desk.ts`), so that twelve copies of
- * it, each with a different voice, are all judged on the same words. The study
- * and the reason for the fixed script are in `docs/tts-preference-plan.md`.
+ * caller through ONE fixed booking script (`desk.ts`), so that sixteen copies of
+ * it — four cloned voices in each of four TTS systems — are all judged on the
+ * same words. The server (`server.ts`) builds those copies; this file is the one
+ * agent they share.
  *
  * The call never books anything and never takes a card: the script's closing
  * twist ("you're a regular, it's on us") is exactly what lets it exercise the
@@ -39,27 +41,27 @@ export default agent({
   greeting:
     "Hello, thanks for calling the Harborlight Hotel. Are you ready to book a room with us?",
   /**
-   * Phase 2 stand-in: give `aai dev` one of the study's voices so a local call
-   * reaches a real `voices.ts` engine, not the framework default. `VOICE_LABEL`
-   * picks the row (default `v01`); Phase 4's routing server replaces this with
-   * one engine per row and even rotation across them.
+   * The voice `aai dev` speaks with. The study server replaces this with one
+   * engine per voice cell; here `DEV_CELL` (`system:voice`, default `ours:jane`)
+   * picks one, falling back to the provider's stock voice while the clones are
+   * still to be made.
    */
-  tts: ttsForRow(devVoiceRow()),
+  tts: ttsForCell(devCell()),
 });
 
 /**
- * The row `aai dev` speaks with: `VOICE_LABEL` if it names a row, else the first
- * row. An unknown label is a mistake worth a loud failure rather than a silent
+ * The cell `aai dev` speaks with: `DEV_CELL` if it names one, else `ours:jane`.
+ * An unknown cell is a mistake worth a loud failure rather than a silent
  * fall-through to a voice you did not pick.
  */
-export function devVoiceRow(): VoiceRow {
-  const label = process.env.VOICE_LABEL ?? "v01";
-  const row = voiceByLabel(label);
-  if (row === undefined) {
+export function devCell(): VoiceCell {
+  const spec = process.env.DEV_CELL ?? "ours:jane";
+  const [system, voice] = spec.split(":");
+  if (!SYSTEMS.includes(system as System) || !VOICE_NAMES.includes(voice as VoiceName)) {
     throw new Error(
-      `VOICE_LABEL=${label} is not a voice row; expected one of ` +
-        `${VOICES.map((v) => v.label).join(", ")}.`,
+      `DEV_CELL=${spec} is not a voice cell; expected <system>:<voice> with system one of ` +
+        `${SYSTEMS.join(", ")} and voice one of ${VOICE_NAMES.join(", ")}.`,
     );
   }
-  return row;
+  return resolveCell(system as System, voice as VoiceName, { allowMissing: true });
 }
