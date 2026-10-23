@@ -335,6 +335,9 @@ export class MemoryStore implements StudyStore {
 
 type Sql = ReturnType<typeof postgres>;
 
+/** The advisory-lock key that serialises new participant numbers. */
+const PARTICIPANT_LOCK = 0x4842_5450; // "HBTP"
+
 export class PostgresStore implements StudyStore {
   private readonly sql: Sql;
 
@@ -352,15 +355,21 @@ export class PostgresStore implements StudyStore {
 
   async signIn(email: string, token: string): Promise<Participant> {
     const key = normaliseEmail(email);
-    // `do update` (a no-op one) rather than `do nothing`, so the existing row is
-    // RETURNED — the second sign-in gets the first sign-in's number and token.
-    const [row] = await this.sql`
-      insert into participants (token, email, is_test)
-      values (${token}, ${key}, ${isTestEmail(key)})
-      on conflict (email) do update set email = excluded.email
-      returning number, token, email, is_test
-    `;
-    return participantFromRow(row);
+    // Participant numbers must be GAPLESS — the schedule balances over runs of
+    // consecutive numbers — and an identity column burns a value on every
+    // conflicting insert. So a returning email is looked up first, and a new one
+    // is numbered max+1 under a transaction-scoped lock.
+    return this.sql.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(${PARTICIPANT_LOCK})`;
+      const [existing] = await tx`select number, token, email, is_test from participants where email = ${key}`;
+      if (existing) return participantFromRow(existing);
+      const [row] = await tx`
+        insert into participants (number, token, email, is_test)
+        select coalesce(max(number) + 1, 0), ${token}, ${key}, ${isTestEmail(key)} from participants
+        returning number, token, email, is_test
+      `;
+      return participantFromRow(row);
+    });
   }
 
   async participant(token: string): Promise<Participant | undefined> {
@@ -527,7 +536,7 @@ export class PostgresStore implements StudyStore {
 async function ensureSchema(sql: Sql): Promise<void> {
   await sql`
     create table if not exists participants (
-      number     integer generated always as identity (start with 0 minvalue 0) primary key,
+      number     integer primary key,
       token      text not null unique,
       email      text not null unique,
       is_test    boolean not null,
