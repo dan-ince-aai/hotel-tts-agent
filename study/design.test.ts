@@ -54,10 +54,10 @@ describe("one participant's block", () => {
     }
   });
 
-  test("rotates the voice between consecutive sessions and uses all four", () => {
+  test("hears a different voice in every session, all from the study's voices", () => {
     const voices = block.map((s) => s.voice);
-    for (let i = 1; i < voices.length; i++) expect(voices[i]).not.toBe(voices[i - 1]);
-    expect(new Set(voices)).toEqual(new Set(VOICE_NAMES));
+    expect(new Set(voices).size).toBe(Math.min(SESSIONS_PER_BLOCK, VOICE_NAMES.length));
+    for (const voice of voices) expect(VOICE_NAMES).toContain(voice);
   });
 
   test("never repeats a persona card across the twelve calls", () => {
@@ -123,10 +123,11 @@ describe("balance over 300 participants who stop early", () => {
         expect(oursFirstShare).toBeGreaterThan(0.45);
         expect(oursFirstShare).toBeLessThan(0.55);
         // And every voice is heard against every competitor, roughly evenly.
+        const even = 1 / VOICE_NAMES.length;
         for (const voice of VOICE_NAMES) {
           const share = theirs.filter((s) => s.voice === voice).length / theirs.length;
-          expect(share, `${competitor}/${voice}`).toBeGreaterThan(0.17);
-          expect(share, `${competitor}/${voice}`).toBeLessThan(0.33);
+          expect(share, `${competitor}/${voice}`).toBeGreaterThan(even * 0.5);
+          expect(share, `${competitor}/${voice}`).toBeLessThan(even * 1.6);
         }
       }
 

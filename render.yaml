@@ -1,75 +1,55 @@
-# Render Blueprint for the hotel-desk blind test.
+# Render Blueprint for the hotel-desk blind test's WEB APP: the participants' page, the study
+# API, the admin page, and the agent's private API, with its Postgres.
 #
-# Apply it from Render: New → Blueprint → point at this repo. Render reads this
-# file, creates BOTH the web service and the managed Postgres below, wires
-# DATABASE_URL between them, and prompts you for the four API keys (the ones
-# marked `sync: false` never live in this committed file). It also generates the
-# export token. See README.md, "Deploying".
+# The voice side is not here: the audio runs on LiveKit Cloud and the desk agent (agent/) is
+# deployed there with `lk agent create`. See README.md, "Deploying".
+#
+# Apply it from Render: New → Blueprint → point at this repo. Render creates the web service
+# and the managed Postgres below, wires DATABASE_URL between them, prompts for the values
+# marked `sync: false`, and generates the two secrets marked `generateValue`.
 
 databases:
   - name: hotel-tts-db
-    # Paid Basic tier ($6/mo). NOT the free tier, which Render deletes after 90
-    # days — this study outlives that. Small is plenty: a few thousand survey
-    # and turn rows.
+    # Paid Basic tier. NOT the free tier, which Render deletes after 30 days.
     plan: basic-256mb
     postgresMajorVersion: "16"
-    # Same region as the web service, so a save never crosses the country.
     region: oregon
 
 services:
   - type: web
     name: hotel-tts-agent
     runtime: node
-    # Paid, always-on ($7/mo). The free web plan sleeps when idle, and a cold
-    # start would spoil the speed numbers this study measures — so, Starter.
+    # Paid, always-on. The free web plan sleeps when idle, and a participant would wait for it
+    # to wake.
     plan: starter
-    # Oregon, as the original hotel demo runs. Latency is COUNTED in this study,
-    # not removed: every system is called from here, and "ours" is called on
-    # production us-east-1, the endpoint customers use. Keep the region fixed for
-    # the whole study so every session pays the same network distance.
     region: oregon
-    # Memory: rehearsal peaked at 311 MB with four callers at once. Starter
-    # (512 MB) covers that; move to Standard if you expect more simultaneous calls.
-    # Build once here; the start command just boots the already-built server.
-    # `--skipTests` keeps the build from running the suite (and spending on it)
-    # on every deploy; typecheck still runs and still gates the build.
-    buildCommand: npm ci && npx aai build --skipTests
-    # Run the built server directly. `npm start` would re-run the build via its
-    # prestart hook — this skips that second build.
+    # Builds the page into dist/client; the server itself runs from source (Node strips types).
+    buildCommand: npm ci && npm run build
     startCommand: node server.ts
-    # The server answers /health (see server.ts); Render uses it to know the
-    # instance is live before sending traffic.
     healthCheckPath: /health
     envVars:
       # Render routes outside traffic only to a service bound to 0.0.0.0.
-      # server.ts reads HOST; without this it falls back to a local-only bind.
       - key: HOST
         value: 0.0.0.0
-      # Render injects PORT automatically and server.ts reads it — do not set it
-      # here.
-      #
-      # Auto-wired from the database above: no copy-pasting the connection
-      # string. The server reads DATABASE_URL (declared in .env.example, which is
-      # how the name reaches it) and saves visitors, surveys, and turns.
+      # Render injects PORT; server.ts reads it.
       - key: DATABASE_URL
         fromDatabase:
           name: hotel-tts-db
           property: connectionString
-      # The four voice-provider keys. `sync: false` means: not in this file —
-      # Render prompts you for each on first apply, and stores them as secrets.
-      - key: ASSEMBLYAI_API_KEY
+      # From the LiveKit Cloud project (Settings → API keys).
+      - key: LIVEKIT_URL
         sync: false
-      - key: CARTESIA_API_KEY
+      - key: LIVEKIT_API_KEY
         sync: false
-      - key: ELEVENLABS_API_KEY
+      - key: LIVEKIT_API_SECRET
         sync: false
-      - key: INWORLD_API_KEY
-        sync: false
-      # The /admin page's password, which also unlocks the CSV exports. Render
-      # asks you to choose it on first apply.
+      # The shared secret the desk agent uses on /internal/*. Render generates it; copy it
+      # into the agent's LiveKit Cloud secrets as STUDY_AGENT_SECRET.
+      - key: STUDY_AGENT_SECRET
+        generateValue: true
+      # The /admin page's password, which also unlocks the CSV exports.
       - key: STUDY_ADMIN_PASSWORD
         sync: false
-      # A generated alternative to the password, for scripts downloading the
-      # CSVs; read it in the dashboard (Environment) when you need it.
+      # A generated alternative to the password, for scripts downloading the CSVs.
       - key: STUDY_ADMIN_TOKEN
         generateValue: true

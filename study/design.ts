@@ -12,7 +12,7 @@
  *   heard once with ours first and once with ours second.
  * - Ours-first alternates session to session, so a participant who stops after
  *   one or two sessions has still not heard ours in the same slot twice.
- * - The voice rotates between sessions (four voices over six sessions).
+ * - The voice changes every session: six of the voices, in a per-person shuffled order.
  * - The twelve persona cards are dealt two per session; none repeats.
  *
  * ## Balanced across participants, not just within one
@@ -38,6 +38,7 @@
  * voice rotation, the card deal and the per-competitor order balance still do.
  */
 import { CARDS } from "./cards.ts";
+import voiceIds from "./voice-ids.json" with { type: "json" };
 
 export const COMPETITORS = ["cartesia", "elevenlabs", "inworld"] as const;
 export type Competitor = (typeof COMPETITORS)[number];
@@ -46,8 +47,12 @@ export type Competitor = (typeof COMPETITORS)[number];
 export type System = "ours" | Competitor;
 export const SYSTEMS: readonly System[] = ["ours", ...COMPETITORS];
 
-export const VOICE_NAMES = ["jane", "shirley", "eli", "charles"] as const;
-export type VoiceName = (typeof VOICE_NAMES)[number];
+/**
+ * The voices under study, by slug (`aai-audrey`…), in `study/voice-ids.json` order. Each is
+ * one reference recording, spoken natively by ours and cloned into every competitor.
+ */
+export const VOICE_NAMES: readonly string[] = voiceIds.voices.map((voice) => voice.slug);
+export type VoiceName = string;
 
 /** Sessions in one balanced block — the most a participant may do. */
 export const SESSIONS_PER_BLOCK = 6;
