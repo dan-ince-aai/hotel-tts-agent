@@ -1,0 +1,43 @@
+[project]
+name = "harborlight-blind-test-agent"
+version = "0.1.0"
+description = "The Harborlight front desk for the TTS blind test: one LiveKit agent, a different TTS per call"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10, <3.15"
+dependencies = [
+    "livekit-agents~=1.8.9",
+    # AssemblyAI streaming STT and TTS (TTS since 1.8.9)
+    "livekit-plugins-assemblyai~=1.8.9",
+    # The three competitors' TTS
+    "livekit-plugins-cartesia~=1.8.9",
+    "livekit-plugins-elevenlabs~=1.8.9",
+    "livekit-plugins-inworld~=1.8.9",
+    # LLM Gateway, through its OpenAI-compatible API
+    "livekit-plugins-openai~=1.8.9",
+    "livekit-plugins-silero~=1.8.9",
+    "aiohttp",
+    "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "desk", "study_api", "tts_factory", "reporting"]
