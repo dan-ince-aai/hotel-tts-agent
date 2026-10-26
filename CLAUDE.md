@@ -1,40 +1,39 @@
 # Agent instructions
 
-This is an [aai](https://github.com/alexkroman/agent) voice-agent project. An agent is a directory
-containing `agent.ts`; the `aai` CLI bundles it and deploys it.
+The hotel-desk TTS blind test: a web app (TypeScript, plain Node + Vite + React) and a voice
+agent (Python, LiveKit Agents, built from AssemblyAI's LiveKit reference agent). Start with
+`README.md`; the agent has its own `agent/README.md`.
 
-## Read the SDK guide before writing agent code
+## Layout
 
-The complete authoring guide ships inside the installed package:
-
-```text
-node_modules/@alexkroman1/aai/AGENT_GUIDE.md
-```
-
-Read it with your file tools. It is version-matched by construction — it lives
-in the same tarball as the `@alexkroman1/aai` this project resolved, so it
-cannot describe a different release than the one being imported. Prefer it over
-anything remembered about the SDK, and over anything in this file.
-
-The types are the second source of truth: the shipped declarations are in
-`node_modules/@alexkroman1/aai/dist/`. When the guide and the types disagree,
-the types are what the compiler enforces.
+- `server.ts`: the web app server (page, study API, admin, the agent's private API).
+- `client.tsx`, `call.ts`, `admin.tsx`, `styles.css`: the page, built by `npm run build`.
+- `study/`: schedule, persona cards, store, API, export, read-back check, admin summary.
+  Every file has a spec beside it.
+- `voices.ts`, `study/voice-ids.json`: the voice grid.
+- `agent/`: the LiveKit desk agent.
+- `scripts/clone_voices.py`: clones the voices into the competitors.
+- `analysis/`: the Elo analysis (Python).
 
 ## Commands
 
 ```sh
-npm run dev            # Run locally on http://localhost:3000
-npm test               # This project's suite, minus the evals
-npm run test:agent     # Just agent.test.ts, via the CLI
-npm run eval           # Drive a real session against a live model (spends money)
-npm run build          # Bundle the agent
-npm start              # Build, then self-host on http://127.0.0.1:3000
-npm run publish:agent  # Publish to the managed platform
+npm test              # web app specs (vitest)
+npm run typecheck
+npm run build         # the page, into dist/client
+npm start             # the server, on http://127.0.0.1:3000
+
+cd agent && uv run pytest
+python3 -m pytest analysis -q
 ```
 
-The `aai` CLI is a devDependency, so it is in `node_modules/.bin` rather than
-on `PATH`: reach it through these scripts or with `npx aai <command>`.
+## Rules that keep the study blind and fair
 
-## Project-specific notes
-
-<!-- Add conventions, gotchas and decisions for THIS agent below. -->
+- Nothing the browser receives may name the system, provider, voice or call order. That
+  includes the LiveKit token, which the browser can decode: it carries only the opaque call
+  token. `study/api.test.ts` and `study/agent-api.test.ts` check this.
+- Everything except the TTS is the same on every call: STT, LLM and its settings, the script,
+  turn detection, interruptions, and the chat history (`use_tts_aligned_transcript` stays
+  off, because not every TTS plugin sends word timings).
+- Node runs `server.ts` by stripping types, so TypeScript must stay erasable
+  (`erasableSyntaxOnly` is on: no parameter properties, enums or namespaces).

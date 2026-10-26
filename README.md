@@ -1,105 +1,111 @@
 # Hotel desk blind test
 
-An internal blind listening test of text-to-speech inside a real voice-agent
-call. A participant phones the Harborlight Hotel front desk twice: once with our
-TTS model and once with a competitor's (Cartesia, ElevenLabs or Inworld). Both
-calls use the same voice, cloned from one recording into each model. They don't
-know which call is which, and afterwards they say which call they would rather
-have had. The main outcome is an Elo rating per vendor with ours anchored at
-1000.
+An internal blind listening test of text-to-speech inside a real voice-agent call. A
+participant phones the Harborlight Hotel front desk twice: once with our TTS model and once
+with a competitor's (Cartesia, ElevenLabs or Inworld). Both calls use the same voice, made
+from one recording. They don't know which call is which, and afterwards they say which call
+they would rather have had. The main outcome is an Elo rating per vendor with ours anchored
+at 1000.
 
-Built on Tom's hotel voice-agent demo with the [aai](https://github.com/alexkroman/agent)
-toolkit.
+The voice side dogfoods AssemblyAI's
+[LiveKit reference agent](https://github.com/AssemblyAI-Solutions/assemblyai-livekit-reference-voice-agent).
 
 ## How it fits together
 
-| Piece | File | What it does |
-| --- | --- | --- |
-| The call | `desk.ts`, `system-prompt.md`, `agent.ts` | One fixed seven-step booking script, run as a single "do the next step not yet done" instruction. LLM `gemma-4-31b`, speak-only, temperature 0.2, dead-air filler off, barge-in needs 2+ words. |
-| The voices | `voices.ts` | The 4 × 4 grid of voices (Jane, Shirley, Eli, Charles) and systems (ours, Cartesia, ElevenLabs, Inworld), each cell a clone id. |
-| The schedule | `study/design.ts`, `study/cards.ts` | Each participant's six-session block: competitor order, ours-first, voice rotation, and twelve persona cards. |
-| The app | `server.ts`, `study/api.ts`, `client.tsx` | Email sign-in, two calls per session routed by opaque token to a hidden engine, then the questionnaire. |
-| The records | `study/store.ts` | Postgres (or in memory for development). |
-| The data | `study/export.ts`, `study/readback.ts` | Session CSV for the analysis, call CSV with transcripts, and the automatic read-back check. |
-| The admin page | `admin.tsx`, `study/admin.ts` | `/admin`, behind `STUDY_ADMIN_PASSWORD`: progress, tallies, call health, transcripts, CSV downloads. |
-| The analysis | `analysis/` | Bradley-Terry-Davidson Elo with participant bootstrap and sensitivity fits. See `analysis/README.md`. |
+```
+ browser ──(LiveKit token for a fresh room)── web app (Render)
+    │                                            ▲   │
+    │ audio                     voice cell,      │   │ dispatch: "harborlight-desk",
+    ▼                           events           │   │ metadata = opaque call token
+ LiveKit Cloud ─────────────── desk agent (LiveKit Cloud) ──── AssemblyAI STT + LLM Gateway
+                                                 └── TTS: AssemblyAI | Cartesia | ElevenLabs | Inworld
+```
 
-The page never learns which system, voice or order a call used. It holds only
-a call token, and the server picks the engine.
+| Piece | Where | What it does |
+| --- | --- | --- |
+| The desk agent | `agent/` (Python) | One LiveKit agent for every call, with Universal-3.6 Pro STT and turn detection, `gemma-4-31b` on LLM Gateway (temperature 0.2, no tools) and the fixed booking script. The TTS is chosen per call through each provider's official LiveKit plugin. See `agent/README.md`. |
+| The web app | `server.ts`, `client.tsx`, `call.ts` | Email sign-in and two calls per session. Each call joins its own LiveKit room. Then the questionnaire. |
+| The voices | `study/voice-ids.json`, `voices.ts` | Nine voices. `ours` is the AssemblyAI library voice; the competitor columns are clones of the same recording. |
+| The schedule | `study/design.ts`, `study/cards.ts` | Each participant's six sessions: competitor order, ours-first, a different voice each time, twelve persona cards. Admin-adjustable competitor weights. |
+| The agent's API | `study/agent-api.ts` | `/internal/calls/{token}`: the agent looks up a call's voice and reports what happened, behind `STUDY_AGENT_SECRET`. |
+| The records | `study/store.ts` | Postgres, or in memory for development. |
+| The data | `study/export.ts`, `study/readback.ts`, `/admin` | Session and call CSVs, the read-back check, and the admin page. |
+| The analysis | `analysis/` | Bradley-Terry-Davidson Elo with participant bootstrap and sensitivity fits. |
+
+The browser never learns which system, voice or order a call used. Its LiveKit token
+dispatches the agent with only an opaque call token, and the agent asks the web app for the
+rest.
+
+## The voices
+
+Nine AssemblyAI library voices, each built from an open-dataset recording (Voice Pool v2:
+GLOBE, LibriVox and Common Voice). The table is `study/voice-ids.json`.
+
+- **English:** Audrey, Ewald, Steven (Australian), Kyla, Carrie (British), Ernest.
+- **Other languages:** Magdalena (German), Malvina and Antonio Luis (Spanish). They read the English script.
+
+Ours speaks each one natively. The competitors speak **clones of the same source recording**,
+made by `scripts/clone_voices.py` (see `scripts/README.md`):
+
+```sh
+uv run scripts/clone_voices.py --clips <folder of aai-*.wav> --dry-run   # what it would do
+uv run scripts/clone_voices.py --clips <folder>                            # clone, fill voice-ids.json
+uv run scripts/clone_voices.py --clips <folder> --verify                   # one test line per clone
+```
+
+The clone keys must belong to the same accounts as the agent's keys, because a clone only
+exists in the account that made it.
+
+The source recordings are listed in the TTS voice catalog: `admin_requests/us/library_voice_batches/`
+and `tools/library_voices/` in the DeepLearning repo, originals under
+`gs://aai-legacy-central1/tts-evaluation/voice_pool_v2/v1/wavs/raw/`.
 
 ## Running it locally
 
-Needs Node 26 (`.node-version`).
+Needs Node 26 (`.node-version`) for the web app, and [uv](https://docs.astral.sh/uv/) plus
+the [LiveKit CLI](https://docs.livekit.io/intro/basics/cli/) for the agent.
 
 ```sh
 npm install
-cp .env.example .env      # then fill in the four provider keys
-npm test                  # the suite (no network, no keys needed)
+cp .env.example .env          # LIVEKIT_*, STUDY_AGENT_SECRET, …
+npm test                      # web app tests, no network
+npm run build && npm start    # http://127.0.0.1:3000 and /admin
+
+cd agent && uv sync
+cp .env.example .env.local    # the same STUDY_AGENT_SECRET, STUDY_API_URL=http://127.0.0.1:3000
+uv run pytest                 # agent logic tests
+uv run src/agent.py dev       # registers with your LiveKit Cloud project
 ```
 
-The server refuses to start until all sixteen voice cells have clone ids. Until
-they do, run with stock voices:
+The web app refuses to start until every voice cell has an id. Before the clones exist, set
+`STUDY_ALLOW_MISSING_VOICES=1` to use stock competitor voices. Those sessions are marked
+rehearsal and kept out of the data. Without `DATABASE_URL`, everything is kept in memory.
 
-```sh
-STUDY_ALLOW_MISSING_VOICES=1 npm start    # builds, then serves http://127.0.0.1:3000
-```
+## Deploying
 
-Without `DATABASE_URL`, everything is kept in memory and lost on restart.
-Sessions from a server running stock voices or a stand-in are marked
-`rehearsal` and never appear in the default export.
+1. **LiveKit Cloud.** Create a project. Its URL, API key and secret go on the web app.
+2. **The web app on Render.** New → Blueprint → this repo (`render.yaml`). It creates the
+   service and Postgres, asks for the `LIVEKIT_*` values and `STUDY_ADMIN_PASSWORD`, and
+   generates `STUDY_AGENT_SECRET`.
+3. **The agent on LiveKit Cloud.** From `agent/`, run `lk cloud auth`, then `lk agent create`,
+   which builds `agent/Dockerfile`. Set its secrets:
+   - `ASSEMBLYAI_API_KEY`, `CARTESIA_API_KEY`, `ELEVENLABS_API_KEY` and `INWORLD_API_KEY`
+   - `STUDY_API_URL`: the Render URL
+   - `STUDY_AGENT_SECRET`: copied from Render
+4. **Check.** Open the Render URL, sign in as `you+test@assemblyai.com`, and make a call on
+   each competitor. On `/admin`, tick "Include rehearsal & test" and confirm every system
+   spoke.
 
-`npm run dev` (`aai dev`) runs a single agent with one voice cell, picked with
-`DEV_CELL=cartesia:shirley`. That's useful for working on the script, but it
-isn't the study app.
+Keep the regions fixed for the whole study. Latency is counted, not removed. Leave
+`STUDY_SEED` alone once real sessions exist.
 
 ## Before launch
 
-### 1. Clone the voices
-
-Each voice is one reference recording, cloned into every system:
-
-- **Jane and Charles:** the original studio recordings behind the Pocket TTS presets (10–12 s each).
-- **Shirley and Eli:** Voice Pool v2 readers (LibriVox `en:librivox:10252` and `en:librivox:11357`).
-
-Clone each into the **same accounts whose keys the server runs with**, because
-a clone lives in the account that made it. Ours goes into `assemblyai-tts-1`
-on production us-east-1. Then paste the ids into `VOICE_IDS` in `voices.ts`
-and check each clone by ear:
-
-```sh
-node elevenlabs-smoke.ts     # speaks a line through every ElevenLabs clone in the grid
-node inworld-smoke.ts        # same for Inworld
-```
-
-### 2. Rehearse
-
-With the competitor clones in but ours not yet, set `STUDY_OURS_STANDIN=cartesia`
-to have Cartesia's clones speak the "ours" column. That's the protocol's
-rehearsal setup. Rehearsal sessions are marked and kept out of the data.
-
-Use a smoke-test address to sign in (anything `@example.com`, or a `+test` tag
-like `you+test@assemblyai.com`). Those participants never count either.
-
-### 3. Pilot
-
-Run a handful of real people on the deployed server. Then check the call CSV
-(below) for setup failures, read-back misses and slow LLM turns, by system.
-
-## Deploying (Render)
-
-`render.yaml` is a Blueprint. In Render: **New → Blueprint →** this repo. It
-creates the web service and a Postgres database in Oregon, wires
-`DATABASE_URL`, asks for the four provider keys, and generates
-`STUDY_ADMIN_TOKEN`.
-
-Calls are long-lived WebSockets, so this needs an always-on server. It won't
-work on a serverless platform such as Vercel.
-
-Keep the region and the plan fixed for the whole study. Latency is counted,
-not removed, so moving the server mid-study changes what's being measured.
-
-Leave `STUDY_SEED` alone once real sessions exist: changing it reshuffles
-everyone's remaining sessions.
+1. **Clone the voices** (above) and listen to every `--verify` file.
+2. **Rehearse.** `STUDY_OURS_STANDIN=cartesia` speaks the "ours" column with Cartesia's
+   clones. Rehearsal sessions and `+test` / `@example.com` sign-ins never count.
+3. **Pilot** with a handful of real people. Check `/admin` for setup failures, read-back
+   misses and slow LLM turns, by system.
 
 ## Watching the study and getting the data out
 
