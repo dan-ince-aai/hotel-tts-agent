@@ -1,13 +1,13 @@
 {
   "voices": [
-    { "slug": "aai-audrey", "name": "Audrey", "language": "en", "ours": "49c443a4-8a1d-5f7e-b70b-98bdbd9823c3", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-ewald", "name": "Ewald", "language": "en", "ours": "0a2551bf-59d3-5248-a862-c8fa65f4e75e", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-steven", "name": "Steven", "language": "en", "ours": "c6e763ab-1ac0-5a5b-9c38-75f909bc1924", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-kyla", "name": "Kyla", "language": "en", "ours": "37e65973-9d96-5aab-adcd-01bf56ab5af9", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-carrie", "name": "Carrie", "language": "en", "ours": "2b6f23c7-4edb-5c18-a5b3-1e005c7c369f", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-ernest", "name": "Ernest", "language": "en", "ours": "ac73d2f0-888d-500a-b5fa-3e98a271ee92", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-magdalena", "name": "Magdalena", "language": "de", "ours": "0b088e97-3c0d-57c7-961d-2ef4d5495d8e", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-malvina", "name": "Malvina", "language": "es", "ours": "8926b6a0-0f06-5208-8627-c970976a5f5b", "cartesia": "", "elevenlabs": "", "inworld": "" },
-    { "slug": "aai-antonioluis", "name": "Antonio Luis", "language": "es", "ours": "bff56a11-dc95-552e-a93a-59f68ca60b64", "cartesia": "", "elevenlabs": "", "inworld": "" }
+    { "slug": "aai-audrey", "name": "Audrey", "language": "en", "ours": "49c443a4-8a1d-5f7e-b70b-98bdbd9823c3", "cartesia": "", "elevenlabs": "HY1UU5p2okv3UzJBNrV3", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-audrey" },
+    { "slug": "aai-ewald", "name": "Ewald", "language": "en", "ours": "0a2551bf-59d3-5248-a862-c8fa65f4e75e", "cartesia": "", "elevenlabs": "OSCO5uEUj4xes6t7U9Iw", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-ewald" },
+    { "slug": "aai-steven", "name": "Steven", "language": "en", "ours": "c6e763ab-1ac0-5a5b-9c38-75f909bc1924", "cartesia": "", "elevenlabs": "TCFvWZXgOIegqjtumSJj", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-steven" },
+    { "slug": "aai-kyla", "name": "Kyla", "language": "en", "ours": "37e65973-9d96-5aab-adcd-01bf56ab5af9", "cartesia": "", "elevenlabs": "FTB7o3BZS0M0T2rarl3F", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-kyla" },
+    { "slug": "aai-carrie", "name": "Carrie", "language": "en", "ours": "2b6f23c7-4edb-5c18-a5b3-1e005c7c369f", "cartesia": "", "elevenlabs": "QrC9ziBsBhQughpvNCUx", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-carrie" },
+    { "slug": "aai-ernest", "name": "Ernest", "language": "en", "ours": "ac73d2f0-888d-500a-b5fa-3e98a271ee92", "cartesia": "", "elevenlabs": "fgBPG9BVgyel0VkXpsHh", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-ernest" },
+    { "slug": "aai-magdalena", "name": "Magdalena", "language": "de", "ours": "0b088e97-3c0d-57c7-961d-2ef4d5495d8e", "cartesia": "", "elevenlabs": "UjoE5kgn7e4d5OIVmlBt", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-magdalena" },
+    { "slug": "aai-malvina", "name": "Malvina", "language": "es", "ours": "8926b6a0-0f06-5208-8627-c970976a5f5b", "cartesia": "", "elevenlabs": "FHSZx7SGL1Bsay944UrV", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-malvina" },
+    { "slug": "aai-antonioluis", "name": "Antonio Luis", "language": "es", "ours": "bff56a11-dc95-552e-a93a-59f68ca60b64", "cartesia": "", "elevenlabs": "LSxxwCfPMr0BPyM9VCdU", "inworld": "default-pitbpl0mlvnap2vrjvk1gw__blindtest-aai-antonioluis" }
   ]
 }
