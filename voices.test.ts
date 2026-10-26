@@ -1,75 +1,106 @@
 import { describe, expect, test } from "vitest";
-import { SYSTEMS, type System, VOICE_NAMES, type VoiceName } from "./study/design.ts";
+import { SYSTEMS, type System, VOICE_NAMES } from "./study/design.ts";
+import voiceIds from "./study/voice-ids.json" with { type: "json" };
 import {
   cellKey,
   gridOptionsFromEnv,
   resolveCell,
   resolveGrid,
   SYSTEM_MODEL,
-  ttsForCell,
   VOICE_IDS,
+  VOICE_LANGUAGE,
+  type VoiceIdTable,
 } from "./voices.ts";
 
 /** A grid with every cell filled, `<system>-<voice>`, so ids are traceable. */
-function fullIds(): Record<VoiceName, Record<System, string>> {
-  const ids = {} as Record<VoiceName, Record<System, string>>;
-  for (const voice of VOICE_NAMES) {
-    ids[voice] = {} as Record<System, string>;
-    for (const system of SYSTEMS) ids[voice][system] = `${system}-${voice}`;
-  }
-  return ids;
+function fullIds(): VoiceIdTable {
+  return Object.fromEntries(
+    VOICE_NAMES.map((voice) => [
+      voice,
+      Object.fromEntries(SYSTEMS.map((system) => [system, `${system}-${voice}`])) as Record<System, string>,
+    ]),
+  );
 }
 
-describe("the voice grid", () => {
-  test("has a cell for every voice in every system", () => {
-    expect(Object.keys(VOICE_IDS).sort()).toEqual([...VOICE_NAMES].sort());
+/** One voice's row of a table, asserted present. */
+function row(ids: VoiceIdTable, voice: string): Record<System, string> {
+  const found = ids[voice];
+  if (!found) throw new Error(`no row ${voice}`);
+  return found;
+}
+
+describe("the voice list", () => {
+  test("is study/voice-ids.json, one voice per row with all four systems", () => {
+    expect(VOICE_NAMES).toEqual(voiceIds.voices.map((v) => v.slug));
+    expect(VOICE_NAMES.length).toBeGreaterThanOrEqual(6);
     for (const voice of VOICE_NAMES) {
-      expect(Object.keys(VOICE_IDS[voice]).sort()).toEqual([...SYSTEMS].sort());
+      expect(Object.keys(row(VOICE_IDS, voice)).sort()).toEqual([...SYSTEMS].sort());
     }
   });
 
-  test("resolves sixteen cells, one per system and voice, keyed system:voice", () => {
+  test("ours is an AssemblyAI library voice id for every voice", () => {
+    for (const voice of VOICE_NAMES) expect(row(VOICE_IDS, voice).ours).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test("knows each recording's language", () => {
+    expect(VOICE_LANGUAGE["aai-audrey"]).toBe("en");
+    expect(VOICE_LANGUAGE["aai-magdalena"]).toBe("de");
+    expect(VOICE_LANGUAGE["aai-malvina"]).toBe("es");
+  });
+});
+
+describe("the voice grid", () => {
+  test("resolves a cell per system and voice, keyed system:voice", () => {
     const cells = resolveGrid({ ids: fullIds() });
-    expect(cells).toHaveLength(16);
-    expect(new Set(cells.map((c) => c.key)).size).toBe(16);
+    expect(cells).toHaveLength(VOICE_NAMES.length * SYSTEMS.length);
+    expect(new Set(cells.map((c) => c.key)).size).toBe(cells.length);
     expect(cells.every((c) => c.source === "clone")).toBe(true);
-    expect(resolveCell("inworld", "eli", { ids: fullIds() })).toMatchObject({
-      key: "inworld:eli",
+    expect(resolveCell("inworld", "aai-ewald", { ids: fullIds() })).toMatchObject({
+      key: "inworld:aai-ewald",
       provider: "inworld",
-      voiceId: "inworld-eli",
+      voiceId: "inworld-aai-ewald",
       model: SYSTEM_MODEL.inworld,
     });
   });
 
   test("refuses to resolve with a cell missing, naming every missing cell", () => {
     const ids = fullIds();
-    ids.jane.ours = "";
-    ids.charles.elevenlabs = "";
-    expect(() => resolveGrid({ ids })).toThrow(/ours:jane, .*elevenlabs:charles/);
+    row(ids, "aai-audrey").cartesia = "";
+    row(ids, "aai-kyla").elevenlabs = "";
+    expect(() => resolveGrid({ ids })).toThrow(/cartesia:aai-audrey, .*elevenlabs:aai-kyla/);
+  });
+
+  test("the checked-in grid still needs its clones, unless stock voices are allowed", () => {
+    // Competitor columns start blank until scripts/clone_voices.py fills them.
+    if (VOICE_NAMES.some((v) => row(VOICE_IDS, v).cartesia === "")) {
+      expect(() => resolveGrid()).toThrow(/clone_voices/);
+    }
+    expect(resolveGrid({ allowMissing: true })).toHaveLength(VOICE_NAMES.length * SYSTEMS.length);
   });
 
   test("a stand-in speaks the ours column with the competitor's clone of the same voice", () => {
     const ids = fullIds();
-    ids.shirley.ours = "";
-    const cell = resolveCell("ours", "shirley", { ids, oursStandIn: "cartesia" });
-    expect(cell).toMatchObject({
+    row(ids, "aai-steven").ours = "";
+    expect(resolveCell("ours", "aai-steven", { ids, oursStandIn: "cartesia" })).toMatchObject({
       system: "ours",
-      key: "ours:shirley",
+      key: "ours:aai-steven",
       provider: "cartesia",
-      voiceId: "cartesia-shirley",
+      voiceId: "cartesia-aai-steven",
       source: "standin",
     });
-    // Competitor cells are untouched by the stand-in.
-    expect(resolveCell("cartesia", "shirley", { ids, oursStandIn: "cartesia" }).source).toBe("clone");
+    expect(resolveCell("cartesia", "aai-steven", { ids, oursStandIn: "cartesia" }).source).toBe("clone");
   });
 
   test("allowMissing fills an empty cell with the provider's stock voice, and says so", () => {
     const ids = fullIds();
-    ids.eli.cartesia = "";
-    const cell = resolveCell("cartesia", "eli", { ids, allowMissing: true });
+    row(ids, "aai-carrie").inworld = "";
+    const cell = resolveCell("inworld", "aai-carrie", { ids, allowMissing: true });
     expect(cell.source).toBe("stock");
     expect(cell.voiceId).toBeUndefined();
-    expect(resolveGrid({ ids, allowMissing: true })).toHaveLength(16);
+  });
+
+  test("an unknown voice is an error, not a silent stock voice", () => {
+    expect(() => resolveCell("ours", "aai-nobody", { allowMissing: true })).toThrow(/no voice/);
   });
 
   test("reads the knobs from the server env, refusing an unknown stand-in", () => {
@@ -82,34 +113,7 @@ describe("the voice grid", () => {
     expect(() => gridOptionsFromEnv({ STUDY_OURS_STANDIN: "rime" })).toThrow();
   });
 
-  test("cellKey spells the engine key", () => {
-    expect(cellKey("ours", "jane")).toBe("ours:jane");
-  });
-});
-
-describe("ttsForCell", () => {
-  const ids = fullIds();
-
-  test("turns each system's cells into that provider's descriptor, with the clone and the pinned model", () => {
-    const expectedKind: Record<System, string> = {
-      ours: "assemblyai",
-      cartesia: "cartesia",
-      elevenlabs: "elevenlabs",
-      inworld: "inworld",
-    };
-    for (const system of SYSTEMS) {
-      const tts = ttsForCell(resolveCell(system, "jane", { ids }));
-      expect(tts.kind).toBe(expectedKind[system]);
-      expect(tts.options.voice).toBe(`${system}-jane`);
-      // AssemblyAI's streaming TTS takes no model field; the others are pinned.
-      if (system !== "ours") expect(tts.options.model).toBe(SYSTEM_MODEL[system]);
-    }
-  });
-
-  test("a stock-voice cell leaves the voice to the descriptor's default", () => {
-    const sparse = fullIds();
-    sparse.jane.elevenlabs = "";
-    const tts = ttsForCell(resolveCell("elevenlabs", "jane", { ids: sparse, allowMissing: true }));
-    expect(tts.options.voice).toBeUndefined();
+  test("cellKey spells the cell", () => {
+    expect(cellKey("ours", "aai-audrey")).toBe("ours:aai-audrey");
   });
 });

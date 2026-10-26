@@ -210,3 +210,6 @@ $RECYCLE.BIN/
 
 # Local agent worktrees.
 .claude/worktrees/
+
+# Clone check recordings (scripts/clone_voices.py --verify)
+voice-checks/

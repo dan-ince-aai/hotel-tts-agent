@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+/*
+ * The page's colours, as Tailwind utilities: `bg-aai-bg`, `bg-aai-surface`, `text-aai-text`,
+ * `border-aai-border`, `bg-aai-primary`. One dark theme for the study page and the admin.
+ */
+@theme {
+  --color-aai-bg: #101418;
+  --color-aai-surface: #1a2026;
+  --color-aai-text: #f2ede4;
+  --color-aai-border: #2a323b;
+  --color-aai-primary: #c8a96e;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@layer base {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--color-aai-bg);
+    color: var(--color-aai-text);
+    font-family: var(--font-sans);
+  }
+}

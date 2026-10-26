@@ -30,7 +30,6 @@
  *   read-back check (`study/readback.ts`) reads the agent's side.
  * - `study_settings` — the admin's matching weights, so they survive a restart.
  */
-import type { MetricsCollectedEvent } from "@alexkroman1/aai";
 import postgres from "postgres";
 import { type Competitor, COMPETITORS, type CompetitorWeights, EQUAL_WEIGHTS, type System, type VoiceName } from "./design.ts";
 
@@ -122,20 +121,6 @@ export interface TurnTimings {
   voiceFirstSoundMs: number | null;
   /** Whether the reply was cut short. */
   interrupted: boolean;
-}
-
-/**
- * Pull the four numbers out of a `metrics.collected` frame, mapping an absent
- * stage to `null` (never zero — a zero averages in as the fast case).
- */
-export function turnTimings(event: MetricsCollectedEvent): TurnTimings {
-  return {
-    wholeTurnMs: event.latencyMs ?? null,
-    endOfSpeechMs: event.stt?.endpointingMs ?? null,
-    modelFirstWordMs: event.llm?.ttftMs ?? null,
-    voiceFirstSoundMs: event.tts?.ttfbMs ?? null,
-    interrupted: event.interrupted,
-  };
 }
 
 /** A saved turn, as the export reads it back. */

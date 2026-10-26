@@ -108,7 +108,7 @@ describe("a session", () => {
 
   test("a server on a stand-in or stock voices marks its sessions rehearsal", async () => {
     const ids = fullIds();
-    for (const voice of VOICE_NAMES) ids[voice].ours = "";
+    for (const voice of VOICE_NAMES) (ids[voice] as Record<System, string>).ours = "";
     const { api, store } = setup({ ids, oursStandIn: "cartesia" });
     const { participant } = await api.signIn({ email: "a@assemblyai.com" });
     const view = await api.startSession({ participant });
@@ -250,7 +250,7 @@ describe("matching weights", () => {
 
   test("rehearsal sessions do not count toward the study's shares", async () => {
     const rehearsalIds = fullIds();
-    for (const voice of VOICE_NAMES) rehearsalIds[voice].ours = "";
+    for (const voice of VOICE_NAMES) (rehearsalIds[voice] as Record<System, string>).ours = "";
     const store = new MemoryStore();
     const rehearsal = new StudyApi({ store, grid: { ids: rehearsalIds, oursStandIn: "cartesia" }, studySeed: "t" });
     await rehearsal.setMatching({ weights: { cartesia: 1, elevenlabs: 1, inworld: 2 } });

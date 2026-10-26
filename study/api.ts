@@ -6,6 +6,7 @@
  * | `POST /api/signin` `{ email }` | finds or creates the participant; returns their token and progress |
  * | `POST /api/progress` `{ participant }` | their progress, for a returning page; hands nothing out |
  * | `POST /api/sessions` `{ participant }` | resumes their unfinished session, or hands out the next one |
+ * | `POST /api/calls/connect` `{ participant, call }` | a LiveKit room and token for one attempt at a call |
  * | `POST /api/calls/event` `{ call, type }` | the page reports a call `completed`, `skipped` or `dropped` |
  * | `POST /api/responses` `{ participant, session, … }` | saves the questionnaire and closes the session |
  * | `POST /api/sessions/close` `{ participant, session }` | closes a session with a skipped call, unanswered |
@@ -39,7 +40,7 @@ import {
   sessionFor,
   weightedSessionFor,
 } from "./design.ts";
-import type { Participant, StudySession, StudyStore } from "./store.ts";
+import type { Participant, StudyCall, StudySession, StudyStore } from "./store.ts";
 
 /** A refusal the server turns into that HTTP status with `{ error }`. */
 export class ApiError extends Error {
@@ -78,6 +79,7 @@ const ratings = z.object({ naturalness: rating, tone: rating, accuracy: rating }
 
 export const SignInBody = z.object({ email: z.string().trim().email().max(320) });
 export const StartBody = z.object({ participant: z.string().uuid() });
+export const ConnectBody = z.object({ participant: z.string().uuid(), call: z.string().uuid() });
 export const CallEventBody = z.object({
   call: z.string().uuid(),
   type: z.enum(["completed", "skipped", "dropped"]),
@@ -247,6 +249,24 @@ export class StudyApi {
     const { weights } = parseBody(MatchingBody, raw);
     await this.store.saveMatching(weights);
     return this.matching();
+  }
+
+  /**
+   * The call a participant is about to join, if it is theirs and still open. The server
+   * then mints the LiveKit access for it (`study/livekit.ts`).
+   */
+  async openCall(raw: unknown): Promise<{ participant: Participant; call: StudyCall }> {
+    const body = parseBody(ConnectBody, raw);
+    const participant = await this.participantFor(body.participant);
+    const call = await this.store.call(body.call);
+    const session = call ? await this.store.session(call.sessionId) : undefined;
+    if (!call || !session || session.participantNumber !== participant.number) {
+      throw new ApiError(404, "no such call");
+    }
+    if (call.completed || call.skipped || session.completedAt !== null) {
+      throw new ApiError(409, "this call is already over");
+    }
+    return { participant, call };
   }
 
   async callEvent(raw: unknown): Promise<{ ok: true }> {

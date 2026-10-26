@@ -1,8 +1,9 @@
 /// <reference types="vite/client" />
-import "@alexkroman1/aai-ui/styles.css";
-import { mountClient, useSession } from "@alexkroman1/aai-ui";
+import "./styles.css";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { AdminApp } from "./admin.tsx";
+import { type CallState, useLiveCall } from "./call.ts";
 import type { CardView } from "./study/cards.ts";
 
 /**
@@ -16,43 +17,23 @@ import type { CardView } from "./study/cards.ts";
  *
  * The server hands a session over as two opaque call tokens and two persona
  * cards (`study/api.ts`). Which call is ours, which competitor, which voice —
- * none of it reaches the browser. The socket for a call presents its token (see
- * {@link CallSocket}) and the server picks the engine. The page shows no
- * transcript either: the participant judges only what they hear.
+ * none of it reaches the browser. A call joins a LiveKit room the server set up
+ * for it, with the desk agent dispatched in carrying only the call token
+ * (`call.ts`). The page shows no transcript either: the participant judges only
+ * what they hear.
  *
  * ## Calls end three ways
  *
- * The caller presses END CALL (the call is done); the call DROPS (a fatal session
- * error — they may retry it, which the server counts as another attempt, or skip
- * it); or they SKIP it because it is not working. A session with a skipped call
+ * The caller presses END CALL (the call is done); the call DROPS (the room or the
+ * agent went away, or the agent never answered — they may retry it, which the
+ * agent counts as another attempt, or skip it); or they SKIP it because it is not
+ * working. A session with a skipped call
  * is closed without the questionnaire — there is nothing fair to compare — and
  * still counts toward the six.
  *
  * The same bundle serves the admin page (`admin.tsx`) at `/admin`; the server
  * hands both paths this page, and the path picks the screen.
  */
-
-// ---------------------------------------------------------------------------
-// The call socket: the framework's session, pointed at one call.
-// ---------------------------------------------------------------------------
-
-/** The token of the call the next socket is for. Set just before `start()`. */
-let activeCallToken = "";
-
-/**
- * The session's WebSocket, with the active call's token on the URL. Injected
- * through `mountClient`, so the framework's own session machinery is used
- * unchanged. An injected constructor never reconnects on its own, which is what
- * the study wants: a dropped call is the participant's choice to retry, and each
- * retry is counted.
- */
-class CallSocket extends WebSocket {
-  constructor(url: string | URL, protocols?: string | string[]) {
-    const withCall = new URL(String(url));
-    withCall.searchParams.set("call", activeCallToken);
-    super(withCall, protocols);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // The API.
@@ -242,59 +223,34 @@ function SignIn({ onSignedIn }: { onSignedIn: (progress: Progress) => void }) {
 // One call.
 // ---------------------------------------------------------------------------
 
-const STATE_LABEL: Record<string, string> = {
-  disconnected: "Connecting…",
+const STATE_LABEL: Record<CallState, string> = {
   connecting: "Connecting…",
-  ready: "Connected",
+  waiting: "Ringing the front desk…",
   listening: "Listening — go ahead",
   thinking: "…",
   speaking: "The desk is speaking",
-  error: "Something went wrong",
 };
 
-/**
- * The live call. Starts the session on mount, ends it on the way out. A fatal
- * error is a DROP: the session is ended and the parent offers retry or skip.
- */
+/** The live call: joins on mount, hangs up on the way out. A drop goes to the parent. */
 function LiveCall({
+  participant,
   call,
   label,
   onEnded,
   onDropped,
   onSkipped,
 }: {
+  participant: string;
   call: SessionView["calls"][number];
   label: string;
   onEnded: () => void;
   onDropped: () => void;
   onSkipped: () => void;
 }) {
-  const session = useSession();
-  const started = useRef(false);
-  // An error already showing when this call mounted belongs to an earlier call
-  // (a retry follows a drop); only a NEW fatal error drops this one.
-  const staleError = useRef(session.error);
-  const dropped = useRef(false);
-  const live = useRef(session);
-  live.current = session;
-
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    activeCallToken = call.token;
-    live.current.start();
-  }, [call.token]);
-
-  // Leaving the screen any other way (closing the tab aside) hangs up.
-  useEffect(() => () => live.current.end(), []);
-
-  const error = session.error;
-  useEffect(() => {
-    if (dropped.current || !error?.fatal || error === staleError.current) return;
-    dropped.current = true;
-    live.current.end();
+  const live = useLiveCall(participant, call.token, (why) => {
+    console.warn(`call dropped: ${why}`);
     onDropped();
-  }, [error, onDropped]);
+  });
 
   return (
     <CenterCard>
@@ -302,10 +258,13 @@ function LiveCall({
       <PersonaCard card={call.card} />
       <div className="flex items-center gap-3 rounded-lg bg-aai-bg px-4 py-3 text-sm">
         <span
-          className={`h-2.5 w-2.5 rounded-full ${session.state === "speaking" ? "animate-pulse bg-aai-primary" : session.state === "listening" ? "bg-green-400" : "bg-aai-border"}`}
+          className={`h-2.5 w-2.5 rounded-full ${live.state === "speaking" ? "animate-pulse bg-aai-primary" : live.state === "listening" ? "bg-green-400" : "bg-aai-border"}`}
         />
-        <span>{STATE_LABEL[session.state] ?? session.state}</span>
+        <span>{STATE_LABEL[live.state]}</span>
       </div>
+      {live.audioBlocked && (
+        <Button onClick={live.resumeAudio}>Tap to hear the desk</Button>
+      )}
       <p className="text-xs leading-relaxed opacity-60">
         When the desk says goodbye, end the call. If you can't hear anything or the call isn't
         working, skip it.
@@ -314,7 +273,7 @@ function LiveCall({
         <Button
           kind="quiet"
           onClick={() => {
-            session.end();
+            live.end();
             onSkipped();
           }}
         >
@@ -322,7 +281,7 @@ function LiveCall({
         </Button>
         <Button
           onClick={() => {
-            session.end();
+            live.end();
             onEnded();
           }}
         >
@@ -686,6 +645,7 @@ function StudyApp() {
     return (
       <LiveCall
         key={`${current.token}-${attempt}`}
+        participant={participant ?? ""}
         call={current}
         label={`Call ${call + 1} of 2`}
         onEnded={() => {
@@ -731,16 +691,8 @@ function StudyApp() {
 }
 
 const isAdmin = location.pathname === "/admin";
+document.title = isAdmin ? "Study admin" : "Hotel desk listening test";
 
-mountClient({
-  component: isAdmin ? AdminApp : StudyApp,
-  name: isAdmin ? "Study admin" : "Hotel desk listening test",
-  WebSocket: CallSocket,
-  theme: {
-    bg: "#101418",
-    primary: "#c8a96e",
-    text: "#f2ede4",
-    surface: "#1a2026",
-    border: "#2a323b",
-  },
-});
+const target = document.getElementById("app");
+// No StrictMode: it runs effects twice in development, which would dial every call twice.
+if (target) createRoot(target).render(isAdmin ? <AdminApp /> : <StudyApp />);
