@@ -21,6 +21,7 @@ toolkit.
 | The app | `server.ts`, `study/api.ts`, `client.tsx` | Email sign-in, two calls per session routed by opaque token to a hidden engine, then the questionnaire. |
 | The records | `study/store.ts` | Postgres (or in memory for development). |
 | The data | `study/export.ts`, `study/readback.ts` | Session CSV for the analysis, call CSV with transcripts, and the automatic read-back check. |
+| The admin page | `admin.tsx`, `study/admin.ts` | `/admin`, behind `STUDY_ADMIN_PASSWORD`: progress, tallies, call health, transcripts, CSV downloads. |
 | The analysis | `analysis/` | Bradley-Terry-Davidson Elo with participant bootstrap and sensitivity fits. See `analysis/README.md`. |
 
 The page never learns which system, voice or order a call used. It holds only
@@ -100,19 +101,34 @@ not removed, so moving the server mid-study changes what's being measured.
 Leave `STUDY_SEED` alone once real sessions exist: changing it reshuffles
 everyone's remaining sessions.
 
-## Getting the data out
+## Watching the study and getting the data out
+
+Set `STUDY_ADMIN_PASSWORD` on the server (in Render, under the service's
+**Environment** tab), then open `https://<service>.onrender.com/admin` and sign
+in with it. The page shows:
+
+- **Progress:** participants, sessions, answered, scored, and setup failures by reason.
+- **Head to head per competitor:** ours / tie / them counts, mean preference, and the share of sessions with ours first.
+- **Mean ratings per system.**
+- **Call health per system:** spoke rate, drops, fatal TTS errors, read-backs right, and median LLM and TTS latency.
+- **Recent sessions:** expand one for each call's failure, ratings, read-back check and transcript.
+
+Rehearsal sessions (stock voices or a stand-in) and `+test` / `@example.com`
+sign-ins are hidden by default. Tick **Include rehearsal & test** to see them.
+
+The **Sessions CSV** and **Calls CSV** buttons download the exports.
+`sessions.csv` is one row per session in the analysis's columns; `calls.csv`
+is one row per call with transcripts. To get the Elo ratings with intervals,
+run the analysis on the sessions file:
 
 ```sh
-TOKEN=...   # STUDY_ADMIN_TOKEN from the Render dashboard
-curl -H "Authorization: Bearer $TOKEN" https://<service>.onrender.com/api/export/sessions.csv -o sessions.csv
-curl -H "Authorization: Bearer $TOKEN" https://<service>.onrender.com/api/export/calls.csv -o calls.csv
 python3 analysis/analyze.py sessions.csv --json results.json
 ```
 
-`sessions.csv` is one row per session, in the analysis's columns. `calls.csv`
-is one row per call: the cell, attempts, drops, the read-back check part by
-part, latency, and both transcripts. Add `?all=1` to either to include
-rehearsal and smoke-test rows, marked.
+For scripts, the same exports are at `/api/export/sessions.csv` and
+`/api/export/calls.csv`. Send `Authorization: Bearer <password>`; the
+generated `STUDY_ADMIN_TOKEN` also works there. Add `?all=1` to include
+rehearsal and test rows.
 
 ## Known limits (accepted)
 

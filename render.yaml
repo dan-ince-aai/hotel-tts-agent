@@ -65,7 +65,11 @@ services:
         sync: false
       - key: INWORLD_API_KEY
         sync: false
-      # Guards GET /api/export/*.csv. Render generates a random value; read it in
-      # the dashboard (Environment) when you need to download the data.
+      # The /admin page's password, which also unlocks the CSV exports. Render
+      # asks you to choose it on first apply.
+      - key: STUDY_ADMIN_PASSWORD
+        sync: false
+      # A generated alternative to the password, for scripts downloading the
+      # CSVs; read it in the dashboard (Environment) when you need it.
       - key: STUDY_ADMIN_TOKEN
         generateValue: true

@@ -106,19 +106,19 @@ export function callFailure(call: StudyCall): string | null {
   return null;
 }
 
-function participantId(number: number): string {
+export function participantId(number: number): string {
   return `p${String(number).padStart(4, "0")}`;
 }
 
-function median(values: number[]): number | null {
+export function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = sorted.length >> 1;
   return sorted.length % 2 ? (sorted[mid] as number) : Math.round(((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2);
 }
 
-/** Everything the export needs, indexed once. */
-function index(dump: StudyDump) {
+/** Everything the export (and the admin page) needs, indexed once. */
+export function indexDump(dump: StudyDump) {
   const participants = new Map(dump.participants.map((p) => [p.number, p]));
   const callsBySession = new Map<string, StudyCall[]>();
   for (const call of dump.calls) {
@@ -149,13 +149,13 @@ function index(dump: StudyDump) {
   return { participants, callsBySession, responses, turnsByCall, transcripts, readback };
 }
 
-function included(session: StudySession, isTest: boolean, options: ExportOptions): boolean {
+export function included(session: StudySession, isTest: boolean, options: ExportOptions): boolean {
   return options.includeAll === true || (!session.rehearsal && !isTest);
 }
 
 /** One row per session — the analysis input. */
 export function sessionRows(dump: StudyDump, options: ExportOptions = {}): Row[] {
-  const ix = index(dump);
+  const ix = indexDump(dump);
   const rows: Row[] = [];
   for (const session of dump.sessions) {
     const participant = ix.participants.get(session.participantNumber);
@@ -209,7 +209,7 @@ export function sessionRows(dump: StudyDump, options: ExportOptions = {}): Row[]
 
 /** One row per call — for reviewing calls by hand, with the transcript. */
 export function callRows(dump: StudyDump, options: ExportOptions = {}): Row[] {
-  const ix = index(dump);
+  const ix = indexDump(dump);
   const rows: Row[] = [];
   for (const session of dump.sessions) {
     const isTest = ix.participants.get(session.participantNumber)?.isTest ?? false;
