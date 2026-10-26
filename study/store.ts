@@ -28,7 +28,8 @@
  *   stage that did not happen.
  * - `utterances` — what each side said, committed turn by committed turn. The
  *   read-back check (`study/readback.ts`) reads the agent's side.
- * - `study_settings` — the admin's matching weights, so they survive a restart.
+ * - `study_settings` — the admin's matching weights and enabled voices, so they survive a
+ *   restart.
  */
 import postgres from "postgres";
 import { type Competitor, COMPETITORS, type CompetitorWeights, EQUAL_WEIGHTS, type System, type VoiceName } from "./design.ts";
@@ -144,6 +145,12 @@ export interface MatchingSettings {
 
 export const DEFAULT_MATCHING: MatchingSettings = { weights: EQUAL_WEIGHTS, changedAt: null };
 
+/** Which voices new sessions may use; `null` until an admin first saves a choice. */
+export interface VoiceSettings {
+  readonly enabled: readonly string[] | null;
+  readonly changedAt: Date | null;
+}
+
 /** Normalise an email for identity: trimmed, lower case. */
 export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -194,6 +201,8 @@ export interface StudyStore {
    * the shares real sessions are steered toward.
    */
   competitorCounts(since: Date | null, rehearsal: boolean): Promise<Record<Competitor, number>>;
+  voiceSettings(): Promise<VoiceSettings>;
+  saveVoiceSettings(enabled: readonly string[]): Promise<VoiceSettings>;
   /** Everything, for the export. */
   dump(): Promise<StudyDump>;
   close(): Promise<void>;
@@ -243,6 +252,7 @@ export class MemoryStore implements StudyStore {
   private readonly turns: TurnRow[] = [];
   private readonly utterances: Utterance[] = [];
   private matchingSettings: MatchingSettings = DEFAULT_MATCHING;
+  private voiceChoice: VoiceSettings = { enabled: null, changedAt: null };
 
   async signIn(email: string, token: string): Promise<Participant> {
     const key = normaliseEmail(email);
@@ -346,6 +356,15 @@ export class MemoryStore implements StudyStore {
   async saveMatching(weights: CompetitorWeights): Promise<MatchingSettings> {
     this.matchingSettings = { weights: { ...weights }, changedAt: new Date() };
     return this.matchingSettings;
+  }
+
+  async voiceSettings(): Promise<VoiceSettings> {
+    return this.voiceChoice;
+  }
+
+  async saveVoiceSettings(enabled: readonly string[]): Promise<VoiceSettings> {
+    this.voiceChoice = { enabled: [...enabled], changedAt: new Date() };
+    return this.voiceChoice;
   }
 
   async competitorCounts(since: Date | null, rehearsal: boolean): Promise<Record<Competitor, number>> {
@@ -566,6 +585,24 @@ export class PostgresStore implements StudyStore {
       returning updated_at
     `;
     return { weights: { ...weights }, changedAt: (row?.updated_at as Date) ?? new Date() };
+  }
+
+  async voiceSettings(): Promise<VoiceSettings> {
+    const [row] = await this.sql`select value, updated_at from study_settings where key = 'voices'`;
+    if (!row) return { enabled: null, changedAt: null };
+    const value = row.value as { enabled?: unknown };
+    const enabled = Array.isArray(value.enabled) ? value.enabled.map(String) : null;
+    return { enabled, changedAt: row.updated_at as Date };
+  }
+
+  async saveVoiceSettings(enabled: readonly string[]): Promise<VoiceSettings> {
+    const [row] = await this.sql`
+      insert into study_settings (key, value, updated_at)
+      values ('voices', ${this.sql.json({ enabled: [...enabled] })}, now())
+      on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at
+      returning updated_at
+    `;
+    return { enabled: [...enabled], changedAt: (row?.updated_at as Date) ?? new Date() };
   }
 
   async competitorCounts(since: Date | null, rehearsal: boolean): Promise<Record<Competitor, number>> {

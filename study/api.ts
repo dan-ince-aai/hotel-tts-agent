@@ -28,6 +28,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { resolveCell, type GridOptions } from "../voices.ts";
+import voiceIds from "./voice-ids.json" with { type: "json" };
 import { cardById, cardView, type CardView } from "./cards.ts";
 import {
   chooseCompetitor,
@@ -38,6 +39,7 @@ import {
   SESSIONS_PER_BLOCK,
   type SessionPlan,
   sessionFor,
+  VOICE_NAMES,
   weightedSessionFor,
 } from "./design.ts";
 import type { Participant, StudyCall, StudySession, StudyStore } from "./store.ts";
@@ -101,6 +103,30 @@ export const MatchingBody = z
   .refine((body) => COMPETITORS.some((c) => body.weights[c] > 0), {
     message: "at least one competitor needs a weight above 0",
   });
+
+/**
+ * The voices new sessions use until an admin chooses: the English ones. A voice from another
+ * language reads the English script with its own language's rules for numbers and
+ * abbreviations, which costs ours on accuracy for a reason that has nothing to do with the
+ * voice.
+ */
+export const DEFAULT_ENABLED_VOICES: readonly string[] = voiceIds.voices
+  .filter((voice) => voice.language === "en")
+  .map((voice) => voice.slug);
+
+export const VoicesBody = z.object({
+  enabled: z
+    .array(z.string())
+    .min(1, "keep at least one voice enabled")
+    .refine((slugs) => slugs.every((slug) => VOICE_NAMES.includes(slug)), "unknown voice"),
+});
+
+/** What the admin page shows about voices. */
+export interface VoicesView {
+  voices: { slug: string; name: string; language: string; enabled: boolean }[];
+  /** `null`: never changed, so the English-only default applies. */
+  changedAt: string | null;
+}
 
 /** What the admin page shows about matching. */
 export interface MatchingView {
@@ -215,9 +241,10 @@ export class StudyApi {
     sessions: StudySession[],
   ): Promise<{ plan: SessionPlan; allocation: "balanced" | "weighted" }> {
     const index = sessions.length + 1;
+    const voices = await this.enabledVoices();
     const { weights, changedAt } = await this.store.matching();
     if (isBalanced(weights)) {
-      return { plan: sessionFor(participant, index, this.studySeed), allocation: "balanced" };
+      return { plan: sessionFor(participant, index, this.studySeed, voices), allocation: "balanced" };
     }
     const handedOut = await this.store.competitorCounts(changedAt, this.rehearsal);
     const met = Object.fromEntries(
@@ -225,9 +252,37 @@ export class StudyApi {
     ) as Record<Competitor, number>;
     const competitor = chooseCompetitor(weights, handedOut, met);
     return {
-      plan: weightedSessionFor(participant, index, competitor, met[competitor], this.studySeed),
+      plan: weightedSessionFor(participant, index, competitor, met[competitor], this.studySeed, voices),
       allocation: "weighted",
     };
+  }
+
+  /** The voices new sessions may use: the admin's choice, else English only. */
+  private async enabledVoices(): Promise<string[]> {
+    const { enabled } = await this.store.voiceSettings();
+    const chosen = (enabled ?? DEFAULT_ENABLED_VOICES).filter((slug) => VOICE_NAMES.includes(slug));
+    return chosen.length > 0 ? chosen : [...DEFAULT_ENABLED_VOICES];
+  }
+
+  /** Every voice, and whether new sessions use it — for the admin page. */
+  async voices(): Promise<VoicesView> {
+    const enabled = new Set(await this.enabledVoices());
+    const { changedAt } = await this.store.voiceSettings();
+    return {
+      voices: voiceIds.voices.map((voice) => ({
+        slug: voice.slug,
+        name: voice.name,
+        language: voice.language,
+        enabled: enabled.has(voice.slug),
+      })),
+      changedAt: changedAt?.toISOString() ?? null,
+    };
+  }
+
+  async setVoices(raw: unknown): Promise<VoicesView> {
+    const { enabled } = parseBody(VoicesBody, raw);
+    await this.store.saveVoiceSettings(enabled);
+    return this.voices();
   }
 
   /** The matching weights and how they are landing — for the admin page. */

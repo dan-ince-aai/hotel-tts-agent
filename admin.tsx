@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { AdminSummary, RecentSession } from "./study/admin.ts";
-import type { MatchingView } from "./study/api.ts";
+import type { MatchingView, VoicesView } from "./study/api.ts";
 import type { Competitor, CompetitorWeights } from "./study/design.ts";
 
 /**
@@ -285,6 +285,93 @@ function MatchingPanel({ password, onError }: { password: string; onError: (mess
   );
 }
 
+const LANGUAGE_LABEL: Record<string, string> = { en: "English", de: "German", es: "Spanish" };
+
+/**
+ * Which voices new sessions use. Off by default for voices recorded in another language:
+ * they read the English script with their own language's rules for numbers and
+ * abbreviations, which costs ours on accuracy for a reason that isn't the voice.
+ */
+function VoicesPanel({ password, onError }: { password: string; onError: (message: string) => void }) {
+  const [view, setView] = useState<VoicesView | null>(null);
+  const [draft, setDraft] = useState<Set<string> | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    adminJson<VoicesView>(password, "/api/admin/voices")
+      .then((next) => {
+        setView(next);
+        setDraft(new Set(next.voices.filter((v) => v.enabled).map((v) => v.slug)));
+      })
+      .catch((e: Error) => onError(e.message));
+  }, [password, onError]);
+
+  if (view === null || draft === null) return null;
+
+  const saved = new Set(view.voices.filter((v) => v.enabled).map((v) => v.slug));
+  const changed = saved.size !== draft.size || [...draft].some((slug) => !saved.has(slug));
+
+  function save(enabled: string[]) {
+    setSaving(true);
+    adminJson<VoicesView>(password, "/api/admin/voices", { enabled })
+      .then((next) => {
+        setView(next);
+        setDraft(new Set(next.voices.filter((v) => v.enabled).map((v) => v.slug)));
+      })
+      .catch((e: Error) => onError(e.message))
+      .finally(() => setSaving(false));
+  }
+
+  function toggle(slug: string) {
+    const next = new Set(draft);
+    if (next.has(slug)) next.delete(slug);
+    else next.add(slug);
+    setDraft(next);
+  }
+
+  return (
+    <Panel
+      title="Voices"
+      note="Which voices new sessions use. Each is spoken natively by ours and cloned into every competitor. Voices recorded in another language are off by default: they read the English script with their own language's rules for numbers and abbreviations. Sessions already handed out keep their voice."
+    >
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {view.voices.map((voice) => (
+          <label
+            key={voice.slug}
+            className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-sm ${draft.has(voice.slug) ? "border-aai-primary" : "border-aai-border opacity-60"}`}
+          >
+            <input type="checkbox" checked={draft.has(voice.slug)} onChange={() => toggle(voice.slug)} />
+            <span className="font-medium">{voice.name}</span>
+            <span className="ml-auto text-xs opacity-60">{LANGUAGE_LABEL[voice.language] ?? voice.language}</span>
+          </label>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="mr-auto text-xs opacity-70">
+          {saved.size} of {view.voices.length} enabled.{" "}
+          {view.changedAt === null ? "Default: English only." : `Changed ${new Date(view.changedAt).toLocaleString()}.`}
+        </p>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => save(view.voices.filter((v) => v.language === "en").map((v) => v.slug))}
+          className="rounded-lg border border-aai-border px-3 py-2 text-sm disabled:opacity-40"
+        >
+          English only
+        </button>
+        <button
+          type="button"
+          disabled={saving || !changed || draft.size === 0}
+          onClick={() => save([...draft])}
+          className="rounded-lg bg-aai-primary px-3 py-2 text-sm font-semibold text-aai-bg disabled:opacity-40"
+        >
+          {saving ? "Saving…" : "Save voices"}
+        </button>
+      </div>
+    </Panel>
+  );
+}
+
 function SessionRow({ session }: { session: RecentSession }) {
   const [open, setOpen] = useState(false);
   const ours = session.oursFirst ? 1 : 2;
@@ -543,6 +630,7 @@ export function AdminApp() {
         </div>
 
         <MatchingPanel password={password} onError={setError} />
+        <VoicesPanel password={password} onError={setError} />
 
         <Panel
           title="Head to head"

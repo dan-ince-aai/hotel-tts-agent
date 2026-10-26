@@ -207,7 +207,8 @@ function handleStudy(
 // ---------------------------------------------------------------------------
 
 /**
- * `GET /api/admin/summary`, `GET`/`POST /api/admin/matching`, and the CSV exports, behind
+ * `GET /api/admin/summary`, `GET`/`POST /api/admin/matching` and `/api/admin/voices`, and the
+ * CSV exports, behind
  * `STUDY_ADMIN_PASSWORD` or the generated `STUDY_ADMIN_TOKEN` (Bearer, or `?token=` for the
  * exports). `?all=1` includes rehearsal and smoke-test rows. With neither secret set, off.
  */
@@ -220,6 +221,7 @@ function handleAdmin(
     const route = {
       "/api/admin/summary": "summary",
       "/api/admin/matching": "matching",
+      "/api/admin/voices": "voices",
       "/api/export/sessions.csv": "sessions",
       "/api/export/calls.csv": "calls",
     }[url.pathname];
@@ -231,6 +233,24 @@ function handleAdmin(
     const presented = bearer(req) ?? url.searchParams.get("token") ?? "";
     if (!secrets.some((secret) => tokenMatches(presented, secret))) {
       refuse(res, "wrong password");
+      return true;
+    }
+    if (route === "voices") {
+      if (req.method === "POST") {
+        respond(
+          res,
+          "saving voices",
+          readJsonBody(req)
+            .then((body) => api.setVoices(body))
+            .then((view) => {
+              const on = view.voices.filter((v) => v.enabled).map((v) => v.slug);
+              console.info(`[study] enabled voices set to ${on.join(", ")}`);
+              return view;
+            }),
+        );
+      } else {
+        respond(res, "reading voices", api.voices());
+      }
       return true;
     }
     if (route === "matching") {
