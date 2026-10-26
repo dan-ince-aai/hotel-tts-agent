@@ -36,7 +36,10 @@ from livekit.agents import (
     cli,
     utils,
 )
-from livekit.plugins import assemblyai, openai, silero
+# Every TTS plugin is imported here, at startup, even though only one speaks each call:
+# LiveKit registers a plugin when it is first imported and refuses to do that off the
+# main thread, so a plugin first imported inside a call would fail the call.
+from livekit.plugins import assemblyai, cartesia, elevenlabs, inworld, openai, silero  # noqa: F401
 
 from desk import GREETING, INSTRUCTIONS, LLM_MODEL, LLM_TEMPERATURE
 from reporting import CallReporter
