@@ -2,6 +2,7 @@
 import "@alexkroman1/aai-ui/styles.css";
 import { mountClient, useSession } from "@alexkroman1/aai-ui";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { AdminApp } from "./admin.tsx";
 import type { CardView } from "./study/cards.ts";
 
 /**
@@ -26,6 +27,9 @@ import type { CardView } from "./study/cards.ts";
  * it); or they SKIP it because it is not working. A session with a skipped call
  * is closed without the questionnaire — there is nothing fair to compare — and
  * still counts toward the six.
+ *
+ * The same bundle serves the admin page (`admin.tsx`) at `/admin`; the server
+ * hands both paths this page, and the path picks the screen.
  */
 
 // ---------------------------------------------------------------------------
@@ -726,9 +730,11 @@ function StudyApp() {
   );
 }
 
+const isAdmin = location.pathname === "/admin";
+
 mountClient({
-  component: StudyApp,
-  name: "Hotel desk listening test",
+  component: isAdmin ? AdminApp : StudyApp,
+  name: isAdmin ? "Study admin" : "Hotel desk listening test",
   WebSocket: CallSocket,
   theme: {
     bg: "#101418",

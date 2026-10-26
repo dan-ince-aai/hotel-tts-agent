@@ -13,8 +13,9 @@
  *   looked up in the store and the socket handed to the engine for that call's
  *   cell. The browser never names a system or a voice; it only ever holds the
  *   token, so nothing on the page can say which call was ours.
- * - **`GET /api/export/{sessions,calls}.csv`** — the data, behind
- *   `STUDY_ADMIN_TOKEN` (`study/export.ts`); off when the token is unset.
+ * - **`GET /admin`** — the admin page, with the data behind it
+ *   (`/api/admin/summary`, `/api/export/{sessions,calls}.csv`) guarded by
+ *   `STUDY_ADMIN_PASSWORD`; see {@link handleAdmin}.
  * - the page itself (`client.tsx`, built into `.aai/client`).
  *
  * ## Why this is a file rather than `aai start`
@@ -67,6 +68,7 @@ import { WebSocketServer } from "ws";
 import { registerElevenLabsTts } from "./elevenlabs-tts-host.ts";
 import { registerInworldTts } from "./inworld-tts-host.ts";
 import { ApiError, StudyApi } from "./study/api.ts";
+import { adminSummary } from "./study/admin.ts";
 import { CALL_COLUMNS, callRows, SESSION_COLUMNS, sessionRows, toCsv } from "./study/export.ts";
 import { MemoryStore, PostgresStore, type StudyStore, turnTimings } from "./study/store.ts";
 import { gridOptionsFromEnv, resolveGrid, ttsForCell, type VoiceCell } from "./voices.ts";
@@ -320,52 +322,97 @@ function handleApi(routes: ReturnType<typeof apiRoutes>) {
   };
 }
 
-/** Constant-time token comparison, so the export token cannot be timed out. */
+/** Constant-time comparison, so a secret cannot be recovered by timing. */
 function tokenMatches(presented: string, expected: string): boolean {
   const a = Buffer.from(presented);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** The page's HTML is served with the same headers the framework gives `/`. */
+const PAGE_HEADERS = {
+  "content-type": "text/html",
+  "content-security-policy":
+    "default-src 'self'; script-src 'self' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline' " +
+    "https://fonts.googleapis.com; connect-src 'self' wss: ws:; img-src 'self' data:; " +
+    "media-src 'self' blob: data:; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'self'",
+  "x-content-type-options": "nosniff",
+  "cache-control": "no-store",
+};
+
+/** A failed admin sign-in waits this long, so guessing the password is slow. */
+const FAILED_AUTH_DELAY_MS = 750;
+
 /**
- * `GET /api/export/sessions.csv` (the analysis input) and `/api/export/calls.csv`
- * (per call, with transcripts). The token comes as `Authorization: Bearer …` or
- * `?token=…`; `?all=1` includes rehearsal and smoke-test rows, marked. With no
- * `STUDY_ADMIN_TOKEN` set the routes do not exist.
+ * The admin surface:
+ *
+ * - `GET /admin` — the page (`admin.tsx`, in the same bundle as the study page;
+ *   `client.tsx` picks it by path). It asks for the password and holds it only
+ *   for the browser tab.
+ * - `GET /api/admin/summary` — what the page shows (`study/admin.ts`).
+ * - `GET /api/export/sessions.csv` (the analysis input) and `/api/export/calls.csv`
+ *   (per call, with transcripts).
+ *
+ * The API routes take the secret as `Authorization: Bearer …` or `?token=…`;
+ * `?all=1` includes rehearsal and smoke-test rows, marked. The secret is
+ * `STUDY_ADMIN_PASSWORD` or `STUDY_ADMIN_TOKEN` — either works, so a password
+ * you choose and the blueprint's generated token can coexist. With neither set,
+ * the routes answer that the admin is off.
  */
-function handleExport(store: StudyStore, adminToken: string | undefined) {
+function handleAdmin(store: StudyStore, secrets: string[], clientDir: string) {
   return (req: IncomingMessage, res: ServerResponse, url: string, method: string): boolean => {
     // The hook's `url` is the path; the query string is only on `req.url`.
     const parsed = new URL(req.url ?? url, "http://localhost");
-    const kind = { "/api/export/sessions.csv": "sessions", "/api/export/calls.csv": "calls" }[parsed.pathname];
-    if (kind === undefined) return false;
-    if (!adminToken) {
-      sendJson(res, 404, { error: "export is off: set STUDY_ADMIN_TOKEN" });
+    if (parsed.pathname === "/admin/") {
+      res.writeHead(301, { location: "/admin" });
+      res.end();
+      return true;
+    }
+    if (parsed.pathname === "/admin") {
+      const page = path.join(clientDir, "index.html");
+      if (!existsSync(page)) return false;
+      res.writeHead(200, PAGE_HEADERS);
+      res.end(readFileSync(page));
+      return true;
+    }
+    const route = {
+      "/api/admin/summary": "summary",
+      "/api/export/sessions.csv": "sessions",
+      "/api/export/calls.csv": "calls",
+    }[parsed.pathname];
+    if (route === undefined) return false;
+    if (secrets.length === 0) {
+      sendJson(res, 404, { error: "the admin is off: set STUDY_ADMIN_PASSWORD on the server" });
       return true;
     }
     const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
-    if (method !== "GET" || !tokenMatches(bearer ?? parsed.searchParams.get("token") ?? "", adminToken)) {
-      sendJson(res, 401, { error: "unauthorized" });
+    const presented = bearer ?? parsed.searchParams.get("token") ?? "";
+    if (method !== "GET" || !secrets.some((secret) => tokenMatches(presented, secret))) {
+      setTimeout(() => sendJson(res, 401, { error: "wrong password" }), FAILED_AUTH_DELAY_MS);
       return true;
     }
-    const options = { includeAll: parsed.searchParams.get("all") === "1" };
+    const includeAll = parsed.searchParams.get("all") === "1";
     store
       .dump()
       .then((dump) => {
+        if (route === "summary") {
+          sendJson(res, 200, adminSummary(dump, { includeAll }));
+          return;
+        }
         const csv =
-          kind === "sessions"
-            ? toCsv(SESSION_COLUMNS, sessionRows(dump, options))
-            : toCsv(CALL_COLUMNS, callRows(dump, options));
+          route === "sessions"
+            ? toCsv(SESSION_COLUMNS, sessionRows(dump, { includeAll }))
+            : toCsv(CALL_COLUMNS, callRows(dump, { includeAll }));
         res.writeHead(200, {
           "content-type": "text/csv; charset=utf-8",
-          "content-disposition": `attachment; filename="${kind}.csv"`,
+          "content-disposition": `attachment; filename="${route}.csv"`,
           "cache-control": "no-store",
         });
         res.end(csv);
       })
       .catch((error: unknown) => {
-        console.error("[study] export failed:", error);
-        if (!res.headersSent) sendJson(res, 500, { error: "export failed" });
+        console.error(`[study] admin ${route} failed:`, error);
+        if (!res.headersSent) sendJson(res, 500, { error: "admin request failed" });
       });
     return true;
   };
@@ -440,16 +487,19 @@ async function main(): Promise<void> {
   });
 
   const api = new StudyApi({ store, grid: gridOptions, studySeed: env.STUDY_SEED ?? "harborlight" });
-  const exportRoutes = handleExport(store, env.STUDY_ADMIN_TOKEN);
+  const clientDir = resolveClientDir(cwd);
+  const adminSecrets = [env.STUDY_ADMIN_PASSWORD, env.STUDY_ADMIN_TOKEN].filter((s): s is string => Boolean(s));
+  if (adminSecrets.length === 0) console.warn("[study] admin page is off: set STUDY_ADMIN_PASSWORD to turn it on");
+  const adminRoutes = handleAdmin(store, adminSecrets, clientDir);
   const studyRoutes = handleApi(apiRoutes(api));
   const server = createRuntimeServer({
     runtime: enginesRuntime(built),
     name: base.name,
     greeting: base.greeting,
-    clientDir: resolveClientDir(cwd),
+    clientDir,
     upgrade: routeCalls(engines, store),
     request: (req, res, url, method) =>
-      exportRoutes(req, res, url, method) || studyRoutes(req, res, url, method),
+      adminRoutes(req, res, url, method) || studyRoutes(req, res, url, method),
   });
 
   const port = Number(process.env.PORT ?? DEFAULT_START_PORT);
