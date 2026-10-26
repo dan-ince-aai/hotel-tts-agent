@@ -12,7 +12,8 @@
  *   heard once with ours first and once with ours second.
  * - Ours-first alternates session to session, so a participant who stops after
  *   one or two sessions has still not heard ours in the same slot twice.
- * - The voice changes every session: six of the voices, in a per-person shuffled order.
+ * - The voice changes every session: the enabled voices, in a per-person shuffled order
+ *   (repeating only if fewer than six are enabled).
  * - The twelve persona cards are dealt two per session; none repeats.
  *
  * ## Balanced across participants, not just within one
@@ -126,7 +127,11 @@ function shuffled<T>(items: readonly T[], random: () => number): T[] {
  * sign-up order). A participant does sessions from the front of this list; the
  * ones they never reach are simply never run.
  */
-export function scheduleFor(participant: number, studySeed = "harborlight"): SessionPlan[] {
+export function scheduleFor(
+  participant: number,
+  studySeed = "harborlight",
+  voices: readonly VoiceName[] = VOICE_NAMES,
+): SessionPlan[] {
   if (!Number.isInteger(participant) || participant < 0) {
     throw new Error(`participant number must be a non-negative integer, got ${participant}`);
   }
@@ -136,7 +141,11 @@ export function scheduleFor(participant: number, studySeed = "harborlight"): Ses
   const oursFirstPhase = Math.floor(participant / COMPETITOR_ORDERS.length) % 2 === 0;
 
   const random = seededRandom(hashSeed(`${studySeed}:${participant}`));
-  const voiceOrder = shuffled(VOICE_NAMES, random);
+  // Shuffle ALL the voices, then keep the enabled ones in that order: the random draws are
+  // the same whatever is enabled, so switching a voice off never reshuffles the card deal.
+  const enabled = new Set(voices);
+  const voiceOrder = shuffled(VOICE_NAMES, random).filter((voice) => enabled.has(voice));
+  if (voiceOrder.length === 0) throw new Error("no voices are enabled");
   const deck = shuffled(
     CARDS.map((card) => card.id),
     random,
@@ -164,8 +173,13 @@ export function scheduleFor(participant: number, studySeed = "harborlight"): Ses
 }
 
 /** One session of a participant's block, by 1-based index. */
-export function sessionFor(participant: number, index: number, studySeed?: string): SessionPlan {
-  const plan = scheduleFor(participant, studySeed)[index - 1];
+export function sessionFor(
+  participant: number,
+  index: number,
+  studySeed?: string,
+  voices?: readonly VoiceName[],
+): SessionPlan {
+  const plan = scheduleFor(participant, studySeed, voices)[index - 1];
   if (plan === undefined) {
     throw new Error(`session index must be 1…${SESSIONS_PER_BLOCK}, got ${index}`);
   }
@@ -238,8 +252,9 @@ export function weightedSessionFor(
   competitor: Competitor,
   meeting: number,
   studySeed?: string,
+  voices?: readonly VoiceName[],
 ): SessionPlan {
-  const base = sessionFor(participant, index, studySeed);
+  const base = sessionFor(participant, index, studySeed, voices);
   const oursFirst = oursFirstFor(participant, competitor, meeting);
   const [first, second]: System[] = oursFirst ? ["ours", competitor] : [competitor, "ours"];
   return {

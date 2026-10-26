@@ -270,3 +270,38 @@ describe("matching weights", () => {
     }
   });
 });
+
+describe("enabled voices", () => {
+  const ENGLISH = ["aai-audrey", "aai-ewald", "aai-steven", "aai-kyla", "aai-carrie", "aai-ernest"];
+
+  test("default to the English voices, and sessions only use those", async () => {
+    const { api, store } = setup();
+    const view = await api.voices();
+    expect(view.changedAt).toBeNull();
+    expect(view.voices.filter((v) => v.enabled).map((v) => v.slug)).toEqual(ENGLISH);
+    for (let p = 0; p < 6; p++) {
+      const { participant } = await api.signIn({ email: `p${p}@assemblyai.com` });
+      for (let k = 0; k < 6; k++) {
+        const session = await api.startSession({ participant });
+        expect(ENGLISH).toContain((await store.session(session.session))?.voice);
+        await api.submitResponse(answer(participant, session.session));
+      }
+    }
+  });
+
+  test("an admin's choice applies to new sessions", async () => {
+    const { api, store } = setup();
+    const saved = await api.setVoices({ enabled: ["aai-kyla", "aai-magdalena"] });
+    expect(saved.changedAt).not.toBeNull();
+    expect(saved.voices.filter((v) => v.enabled).map((v) => v.slug)).toEqual(["aai-kyla", "aai-magdalena"]);
+    const { participant } = await api.signIn({ email: "a@assemblyai.com" });
+    const view = await api.startSession({ participant });
+    expect(["aai-kyla", "aai-magdalena"]).toContain((await store.session(view.session))?.voice);
+  });
+
+  test("refuses no voices, or a voice that doesn't exist", async () => {
+    const { api } = setup();
+    await expect(api.setVoices({ enabled: [] })).rejects.toMatchObject({ status: 400 });
+    await expect(api.setVoices({ enabled: ["aai-nobody"] })).rejects.toMatchObject({ status: 400 });
+  });
+});

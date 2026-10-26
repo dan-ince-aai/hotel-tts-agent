@@ -226,3 +226,28 @@ describe("weighted matching", () => {
     expect(paired.calls.map((c) => c.system).sort()).toEqual(["inworld", "ours"]);
   });
 });
+
+describe("enabled voices", () => {
+  const english = VOICE_NAMES.slice(0, 6);
+
+  test("sessions only use the enabled voices", () => {
+    for (let participant = 0; participant < 30; participant++) {
+      for (const session of scheduleFor(participant, "harborlight", english)) {
+        expect(english).toContain(session.voice);
+      }
+    }
+  });
+
+  test("switching a voice off never changes the card deal or the competitor order", () => {
+    const all = scheduleFor(5);
+    const some = scheduleFor(5, "harborlight", english);
+    expect(some.map((s) => s.calls.map((c) => c.cardId))).toEqual(all.map((s) => s.calls.map((c) => c.cardId)));
+    expect(some.map((s) => s.competitor)).toEqual(all.map((s) => s.competitor));
+  });
+
+  test("fewer than six voices repeat; none is an error", () => {
+    const two = VOICE_NAMES.slice(0, 2);
+    expect(new Set(scheduleFor(0, "harborlight", two).map((s) => s.voice))).toEqual(new Set(two));
+    expect(() => scheduleFor(0, "harborlight", [])).toThrow(/no voices/);
+  });
+});
