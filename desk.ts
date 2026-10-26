@@ -1,133 +1,92 @@
 /**
  * The CALL, as a dialog — the fixed booking script every caller hears.
  *
- * This is the voice-study version of the Harborlight desk. The repo's open-ended
- * receptionist (dozens of tools, a full booking state machine) is gone from the
- * conversation on purpose: the study compares twelve voices, so every caller has
- * to hear the SAME words in the SAME order, or the voice is not what is being
- * judged. See `docs/tts-preference-plan.md`, "What the call itself does".
+ * This is the blind-test version of the Harborlight desk. Every caller has to
+ * hear the SAME short script, so the TTS model is the only thing that varies
+ * between the two calls of a session. The script is built around what a TTS gets
+ * wrong: a spelled name, a date and a full street address, each read back.
  *
- * So the flow is a straight line of speak-only turns, one state per agent turn:
+ * | step | what the agent does |
+ * | --- | --- |
+ * | 1 | greets the caller and asks if they are ready to book (the `greeting` in `agent.ts`) |
+ * | 2 | asks for the full name and a letter-by-letter spelling of the last name |
+ * | 3 | reads the name back, spells the last name back, asks which night |
+ * | 4 | reads the night back, then asks for the street address |
+ * | 5 | reads the whole address back and asks the caller to confirm |
+ * | 6 | the twist: "you're one of our regulars, we have your card on file", asks how they are |
+ * | 7 | the night is on the house; goodbye |
  *
- * | step (concept plan) | state | what the agent says this turn |
- * | --- | --- | --- |
- * | 1. hello + "ready to book?" | — | the `greeting` in `agent.ts`, before the dialog |
- * | 2. ask name, spell last name | `ready` | asks for the name and the spelling |
- * | 3. read name back + ask the night | `readName` | spells the last name back, asks which night |
- * | 4. read night back + ask address | `readNight` | reads the night back, asks for the address |
- * | 6. read address back + confirm | `readAddress` | reads the address back, asks them to confirm |
- * | 7. "you're a regular, it's on us" | `theTwist` | the twist, then asks how they are |
- * | 8. free night + goodbye | `farewell` | the night is free, goodbye — `final` |
+ * ## One instruction, not one state per step
  *
- * The hinge between every turn is the caller's reply: each state declares one
- * transition on `@user-transcript.committed` to the next. That is the same seam
- * the old `offering`/`readBack` states used — an obligation to SPEAK is
- * discharged by the caller's next turn, which no tool call can observe but a
- * session event can — applied to the whole script rather than two moments of it.
+ * An earlier version advanced one state per caller turn. That breaks on a real
+ * caller: a "hello?", an "okay" or a spelling given in two breaths each commit a
+ * turn and pushed the script ahead of the conversation, so read-backs came out
+ * wrong (2/8 right with a scripted untidy caller). Worse for the study, a slower
+ * system draws more "hello?"s, so the old script was unfair to it.
  *
- * Two voice knobs ride on the states, for the same reasons the old desk used
- * them:
+ * So the whole script is ONE speaking state whose instruction is "do the next
+ * step not yet done; re-ask if the caller's turn completed nothing". The model
+ * tracks progress from the conversation itself, which it can see and a state
+ * machine cannot (16/16 read-backs right with the same untidy caller).
  *
- * - **`toolChoice: "none"` on every speaking state.** The study's other hotel
- *   tools still exist in `tools/` (verification, the restaurant, concierge), but
- *   the pinned script must never reach for one: a caller question answered by a
- *   policy lookup would be a different call, and a different call is a different
- *   voice test. Removing every tool for the turn leaves the model only the
- *   sentence the state describes.
- * - **`temperature: 0.2` on the read-back turns.** Reading a spelled name, a
- *   night and an address back is transcription, and the failure those turns have
- *   is a model smoothing one letter or number into another — exactly the slip
- *   the study is built to catch, so the model's own voice should not add to it.
+ * Two knobs ride on the state:
+ *
+ * - **`toolChoice: "none"`.** The agent is speak-only; a caller question answered
+ *   by a lookup would be a different call, and a different call is a different
+ *   voice test.
+ * - **`temperature: 0.2`.** Reading back a spelled name, a night and an address
+ *   is transcription; the model's own variety should not add slips to it.
  */
 
 import type { AnyDialog, ToolChoice } from "@alexkroman1/aai";
 import { dialog } from "@alexkroman1/aai";
 
 /**
- * Every script turn is the model SAYING one thing and nothing else.
- *
- * Named once because all six speaking states carry the same rule, and typed
- * {@link ToolChoice} because a bare `"none"` would widen to `string` and stop
- * being checked against the four values the field admits.
+ * Every turn is the model SAYING one thing and nothing else. Typed
+ * {@link ToolChoice} because a bare `"none"` would widen to `string`.
  */
 const SPEAK_ONLY: ToolChoice = "none";
 
-/** The read-backs want a steady voice — see the module comment. */
-const STEADY = 0.2;
+/** Steady sampling for every turn — see the module comment. */
+export const SCRIPT_TEMPERATURE = 0.2;
+
+/** The seven steps, as the model is told them. Step 1 is the greeting. */
+export const SCRIPT_STEPS = [
+  "Greet the caller and ask if they are ready to book a room. (Already done by the greeting.)",
+  "Ask for their full name, and in the same turn ask them to spell their last name letter by letter.",
+  "Read their full name back, spell their last name back letter by letter exactly as they spelled it, then ask which night they would like to stay.",
+  "Read the night back exactly as they said it, then ask for their full street address.",
+  "Read the whole address back - number, street, unit, city, state and ZIP - and ask them to confirm it is correct.",
+  "The twist: say you recognise them - they are one of your regulars and you already have their card on file, so no payment is needed - then ask, by first name, how they are doing today. Take no payment and ask for no card.",
+  "Tell them the night is on the house, completely free, that you look forward to seeing them, and say goodbye. The call is then over.",
+] as const;
+
+export const SCRIPT_INSTRUCTION =
+  "You are running a fixed seven-step booking script:\n" +
+  SCRIPT_STEPS.map((step, i) => `${i + 1}. ${step}`).join("\n") +
+  "\n\nOn every turn, do the NEXT step not yet done, and only that step. Work out where you are " +
+  "from the conversation so far. If the caller's last turn did not complete the current step - " +
+  "they said hello, okay, asked you to repeat, or gave only part of what you asked for (for " +
+  "example half a spelling) - do not move on: briefly re-ask for what is still missing. If they " +
+  "correct something, read the corrected value back before moving on. Once step 7 is done, say " +
+  "nothing more than a short goodbye if they speak again.";
 
 const deskSpec = {
   initial: "call",
   states: {
     /**
-     * The whole script, wrapped so the hang-up is declared ONCE: a caller who
-     * drops at any step bubbles `@session.timed-out` up to here and lands on
-     * `hungUp`, final, so a model talking to a dead line says nothing more.
+     * The whole script, wrapped so the hang-up is declared once: a caller who
+     * drops bubbles `@session.timed-out` up to here and lands on `hungUp`, so a
+     * model talking to a dead line says nothing more.
      */
     call: {
-      initial: "ready",
+      initial: "script",
       on: { "@session.timed-out": "hungUp" },
       states: {
-        // Step 2. The greeting already asked if they are ready to book; they
-        // have just answered. Get the name, and the spelling in the same breath.
-        ready: {
+        script: {
           toolChoice: SPEAK_ONLY,
-          instruction:
-            "The caller has just said whether they are ready to book a room. Warmly ask for " +
-            "their full name, and in the SAME turn ask them to spell their last name letter by " +
-            "letter. One short, friendly line - do not take any other detail yet.",
-          on: { "@user-transcript.committed": "readName" },
-        },
-        // Step 3, and the start of step 4. Read the name back - spelled - and
-        // ask which night, which is the next thing to read back.
-        readName: {
-          toolChoice: SPEAK_ONLY,
-          temperature: STEADY,
-          instruction:
-            "Repeat the caller's full name back, and spell their last name back letter by " +
-            "letter, exactly as they gave it. Then ask which single night they would like to " +
-            "stay. One or two short sentences.",
-          on: { "@user-transcript.committed": "readNight" },
-        },
-        // Step 4 read-back, and step 5. Read the night back, then pivot to
-        // "payment" - whose first and only step, by design, is the address.
-        readNight: {
-          toolChoice: SPEAK_ONLY,
-          temperature: STEADY,
-          instruction:
-            "Repeat the night the caller named back to them, exactly as they said it. Then say " +
-            "you will take payment now, and the first thing you need is their address - ask for " +
-            "their full street address. One short line. Do not ask for a card.",
-          on: { "@user-transcript.committed": "readAddress" },
-        },
-        // Step 6. Read the address back and have them confirm it.
-        readAddress: {
-          toolChoice: SPEAK_ONLY,
-          temperature: STEADY,
-          instruction:
-            "Repeat the caller's address back to them in full, then ask them to confirm it is " +
-            "correct. One short line.",
-          on: { "@user-transcript.committed": "theTwist" },
-        },
-        // Step 7. The twist: you know them, you have their card, no payment is
-        // taken. Then ask, by first name, how they are - the turn they answer.
-        theTwist: {
-          toolChoice: SPEAK_ONLY,
-          temperature: STEADY,
-          instruction:
-            "Now the warm twist. Say: oh - you're [their full name] from [the city in the " +
-            "address they just gave]! We know you - you're one of our regulars, and we already " +
-            "have your card on file. Then ask, by their first name, how they are doing today. " +
-            "Take NO payment and ask for no card. One or two short sentences.",
-          on: { "@user-transcript.committed": "farewell" },
-        },
-        // Step 8. The night is free; see you then; goodbye. The call is done.
-        farewell: {
-          final: true,
-          toolChoice: SPEAK_ONLY,
-          instruction:
-            "Tell the caller warmly that this night is on the house, completely free, and that " +
-            "you look forward to seeing them on the night they named earlier. Then say a friendly " +
-            "goodbye. One or two short sentences - the call is ending.",
+          temperature: SCRIPT_TEMPERATURE,
+          instruction: SCRIPT_INSTRUCTION,
         },
       },
     },
@@ -141,13 +100,12 @@ const deskSpec = {
 
 /**
  * The call's position, on its own slot. Persisted with the session, so a
- * reconnect resumes the script where it was rather than restarting it.
+ * reconnect resumes rather than restarts.
  */
 export const deskFlow = dialog("desk", deskSpec);
 
 /**
  * What `agent({ dialogs })` is handed — the line that wires
- * `@user-transcript.committed` and `@session.timed-out` to the dialog. Without
- * it the script could never advance from one turn to the next.
+ * `@session.timed-out` to the dialog.
  */
 export const DIALOGS: readonly AnyDialog[] = [deskFlow];
