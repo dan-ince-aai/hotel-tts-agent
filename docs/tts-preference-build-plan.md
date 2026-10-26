@@ -1,3 +1,8 @@
+> **Superseded.** This is the original single-call plan the blind test grew
+> out of: one call, one stock voice per provider, four Likert statements. The
+> study now runs as a paired, same-voice comparison; see `README.md` for how it
+> works today. Kept for the history of the design.
+
 # Build plan: the hotel voice-preference study
 
 This is the step-by-step build plan for the study described in

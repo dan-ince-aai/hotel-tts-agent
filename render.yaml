@@ -1,11 +1,10 @@
-# Render Blueprint for the hotel voice-preference study.
+# Render Blueprint for the hotel-desk blind test.
 #
 # Apply it from Render: New → Blueprint → point at this repo. Render reads this
 # file, creates BOTH the web service and the managed Postgres below, wires
 # DATABASE_URL between them, and prompts you for the four API keys (the ones
-# marked `sync: false` never live in this committed file).
-#
-# See docs/tts-preference-build-plan.md, Phase 9.
+# marked `sync: false` never live in this committed file). It also generates the
+# export token. See README.md, "Deploying".
 
 databases:
   - name: hotel-tts-db
@@ -14,6 +13,8 @@ databases:
     # and turn rows.
     plan: basic-256mb
     postgresMajorVersion: "16"
+    # Same region as the web service, so a save never crosses the country.
+    region: oregon
 
 services:
   - type: web
@@ -22,6 +23,13 @@ services:
     # Paid, always-on ($7/mo). The free web plan sleeps when idle, and a cold
     # start would spoil the speed numbers this study measures — so, Starter.
     plan: starter
+    # Oregon, as the original hotel demo runs. Latency is COUNTED in this study,
+    # not removed: every system is called from here, and "ours" is called on
+    # production us-east-1, the endpoint customers use. Keep the region fixed for
+    # the whole study so every session pays the same network distance.
+    region: oregon
+    # Memory: rehearsal peaked at 311 MB with four callers at once. Starter
+    # (512 MB) covers that; move to Standard if you expect more simultaneous calls.
     # Build once here; the start command just boots the already-built server.
     # `--skipTests` keeps the build from running the suite (and spending on it)
     # on every deploy; typecheck still runs and still gates the build.
@@ -57,3 +65,7 @@ services:
         sync: false
       - key: INWORLD_API_KEY
         sync: false
+      # Guards GET /api/export/*.csv. Render generates a random value; read it in
+      # the dashboard (Environment) when you need to download the data.
+      - key: STUDY_ADMIN_TOKEN
+        generateValue: true
