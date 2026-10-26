@@ -1,5 +1,13 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { AdminSummary, RecentSession } from "./study/admin.ts";
+import type { MatchingView } from "./study/api.ts";
+import type { Competitor, CompetitorWeights } from "./study/design.ts";
+
+/**
+ * Spelled out here rather than imported: a value import of `study/design.ts`
+ * would ship the schedule into the participants' bundle. Types only cross over.
+ */
+const COMPETITORS: readonly Competitor[] = ["cartesia", "elevenlabs", "inworld"];
 
 /**
  * The admin page, at `/admin` — for whoever runs the study, never participants.
@@ -41,6 +49,18 @@ async function fetchSummary(password: string, includeAll: boolean): Promise<Admi
   });
   if (response.status === 401) throw new Unauthorized("wrong password");
   const payload = (await response.json()) as AdminSummary & { error?: string };
+  if (!response.ok) throw new Error(payload.error ?? `the server answered ${response.status}`);
+  return payload;
+}
+
+async function adminJson<T>(password: string, path: string, body?: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { authorization: `Bearer ${password}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (response.status === 401) throw new Unauthorized("wrong password");
+  const payload = (await response.json()) as T & { error?: string };
   if (!response.ok) throw new Error(payload.error ?? `the server answered ${response.status}`);
   return payload;
 }
@@ -169,6 +189,100 @@ function Tag({ children, tone = "plain" }: { children: ReactNode; tone?: "plain"
 
 function Check({ ok, label }: { ok: boolean; label: string }) {
   return <Tag tone={ok ? "good" : "bad"}>{`${ok ? "✓" : "✗"} ${label}`}</Tag>;
+}
+
+/**
+ * The competitor weights. Ours is in every session; these decide which
+ * competitor it is paired with. Equal weights run the protocol's balanced block;
+ * anything else steers new sessions toward the target shares.
+ */
+function MatchingPanel({ password, onError }: { password: string; onError: (message: string) => void }) {
+  const [view, setView] = useState<MatchingView | null>(null);
+  const [draft, setDraft] = useState<CompetitorWeights | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    adminJson<MatchingView>(password, "/api/admin/matching")
+      .then((next) => {
+        setView(next);
+        setDraft(next.weights);
+      })
+      .catch((e: Error) => onError(e.message));
+  }, [password, onError]);
+
+  if (view === null || draft === null) return null;
+
+  const total = COMPETITORS.reduce((sum, c) => sum + (draft[c] || 0), 0);
+  const share = (c: (typeof COMPETITORS)[number]) => (total === 0 ? 0 : (draft[c] || 0) / total);
+  const changed = COMPETITORS.some((c) => draft[c] !== view.weights[c]);
+  const valid = total > 0 && COMPETITORS.every((c) => draft[c] >= 0 && draft[c] <= 100);
+  const sinceTotal = COMPETITORS.reduce((sum, c) => sum + view.sinceChange[c], 0);
+
+  function save(weights: CompetitorWeights) {
+    setSaving(true);
+    adminJson<MatchingView>(password, "/api/admin/matching", { weights })
+      .then((next) => {
+        setView(next);
+        setDraft(next.weights);
+      })
+      .catch((e: Error) => onError(e.message))
+      .finally(() => setSaving(false));
+  }
+
+  return (
+    <Panel
+      title="Matching"
+      note="Ours is in every session; these weights decide which competitor it faces. Equal weights run the protocol's balanced six-session block. Unequal weights steer new sessions to the target shares (the comparison you most need to resolve, say), and 0 takes a competitor out — e.g. while its provider is down. Call order stays counterbalanced either way."
+    >
+      <div className="flex flex-wrap items-end gap-4">
+        {COMPETITORS.map((c) => (
+          <label key={c} className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Ours vs {SYSTEM_LABEL[c]}</span>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={Number.isNaN(draft[c]) ? "" : draft[c]}
+                onChange={(e) => setDraft({ ...draft, [c]: e.target.value === "" ? Number.NaN : Number(e.target.value) })}
+                className="w-20 rounded-lg border border-aai-border bg-aai-bg px-2 py-1.5 text-right tabular-nums outline-none focus:border-aai-primary"
+              />
+              <span className="w-12 text-xs tabular-nums opacity-60">{Math.round(share(c) * 100)}%</span>
+            </div>
+          </label>
+        ))}
+        <div className="ml-auto flex gap-2">
+          <button
+            type="button"
+            disabled={saving || view.balanced}
+            onClick={() => save({ cartesia: 1, elevenlabs: 1, inworld: 1 })}
+            className="rounded-lg border border-aai-border px-3 py-2 text-sm disabled:opacity-40"
+          >
+            Reset to balanced
+          </button>
+          <button
+            type="button"
+            disabled={saving || !changed || !valid}
+            onClick={() => save(draft)}
+            className="rounded-lg bg-aai-primary px-3 py-2 text-sm font-semibold text-aai-bg disabled:opacity-40"
+          >
+            {saving ? "Saving…" : "Save weights"}
+          </button>
+        </div>
+      </div>
+      <p className="text-xs opacity-70">
+        {view.balanced ? "Now: balanced block (protocol default)." : "Now: weighted."}{" "}
+        {view.changedAt === null
+          ? "Never changed."
+          : `Since the last change (${new Date(view.changedAt).toLocaleString()}), ${sinceTotal} study session(s): ` +
+            COMPETITORS.map(
+              (c) =>
+                `${SYSTEM_LABEL[c]} ${view.sinceChange[c]} (${sinceTotal === 0 ? 0 : Math.round((view.sinceChange[c] / sinceTotal) * 100)}%, target ${Math.round(view.targetShare[c] * 100)}%)`,
+            ).join(" · ")}
+      </p>
+    </Panel>
+  );
 }
 
 function SessionRow({ session }: { session: RecentSession }) {
@@ -427,6 +541,8 @@ export function AdminApp() {
             }
           />
         </div>
+
+        <MatchingPanel password={password} onError={setError} />
 
         <Panel
           title="Head to head"

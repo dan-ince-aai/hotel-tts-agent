@@ -198,6 +198,9 @@ export function sessionRows(dump: StudyDump, options: ExportOptions = {}): Row[]
       readback_ok_ours: rbOurs?.ok,
       readback_ok_competitor: rbTheirs?.ok,
     };
+    // Not an analysis column (it reads by name and ignores extras): whether this
+    // session came from the balanced block or the admin's weights.
+    row.allocation = session.allocation;
     if (options.includeAll) {
       row.rehearsal = session.rehearsal;
       row.test_participant = isTest;

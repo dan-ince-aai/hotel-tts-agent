@@ -113,6 +113,22 @@ in with it. The page shows:
 - **Call health per system:** spoke rate, drops, fatal TTS errors, read-backs right, and median LLM and TTS latency.
 - **Recent sessions:** expand one for each call's failure, ratings, read-back check and transcript.
 
+### Matching weights
+
+Ours is in every session; the **Matching** panel on `/admin` sets how often
+each competitor is the one it faces.
+
+- **Equal weights (the default):** the protocol's balanced six-session block.
+- **Unequal weights:** new sessions are steered to the target shares, counted from the moment you save. Use this to spend sessions on the comparison that's hardest to call.
+- **A weight of 0:** takes a competitor out of rotation, for example while its provider is down.
+
+Call order stays counterbalanced per competitor either way. Each session
+records which mode handed it out (`allocation` in `sessions.csv`).
+
+Changing the weights mid-study is fine for the analysis, because each session
+is an independent comparison. The cost is that a person no longer
+necessarily meets every competitor.
+
 Rehearsal sessions (stock voices or a stand-in) and `+test` / `@example.com`
 sign-ins are hidden by default. Tick **Include rehearsal & test** to see them.
 

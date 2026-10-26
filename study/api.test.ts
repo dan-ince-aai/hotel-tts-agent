@@ -198,3 +198,75 @@ describe("call events and answers", () => {
     expect((await api.startSession({ participant })).index).toBe(2);
   });
 });
+
+describe("matching weights", () => {
+  async function answerAll(api: StudyApi, participant: string, view: { session: string }) {
+    await api.submitResponse(answer(participant, view.session));
+  }
+
+  test("equal weights hand out the balanced block, marked balanced", async () => {
+    const { api, store } = setup();
+    const { participant } = await api.signIn({ email: "a@assemblyai.com" });
+    const view = await api.startSession({ participant });
+    const session = await store.session(view.session);
+    expect(session?.allocation).toBe("balanced");
+    expect(session?.competitor).toBe(sessionFor(0, 1, "test").competitor);
+  });
+
+  test("unequal weights steer new sessions to the target shares, marked weighted", async () => {
+    const { api, store } = setup();
+    await api.setMatching({ weights: { cartesia: 0, elevenlabs: 1, inworld: 3 } });
+    const counts = { cartesia: 0, elevenlabs: 0, inworld: 0 };
+    for (let p = 0; p < 20; p++) {
+      const { participant } = await api.signIn({ email: `p${p}@assemblyai.com` });
+      for (let k = 0; k < 2; k++) {
+        const view = await api.startSession({ participant });
+        const session = await store.session(view.session);
+        expect(session?.allocation).toBe("weighted");
+        counts[session?.competitor ?? "cartesia"]++;
+        await answerAll(api, participant, view);
+      }
+    }
+    expect(counts).toEqual({ cartesia: 0, elevenlabs: 10, inworld: 30 });
+    const view = await api.matching();
+    expect(view).toMatchObject({ balanced: false, sinceChange: counts, targetShare: { inworld: 0.75 } });
+  });
+
+  test("ours stays in every weighted session, first about half the time per competitor", async () => {
+    const { api, store } = setup();
+    await api.setMatching({ weights: { cartesia: 1, elevenlabs: 2, inworld: 1 } });
+    for (let p = 0; p < 40; p++) {
+      const { participant } = await api.signIn({ email: `p${p}@assemblyai.com` });
+      await api.startSession({ participant });
+    }
+    const { sessions, calls } = await store.dump();
+    for (const s of sessions) {
+      const systems = calls.filter((c) => c.sessionId === s.id).map((c) => c.system);
+      expect(systems).toContain("ours");
+    }
+    const eleven = sessions.filter((s) => s.competitor === "elevenlabs");
+    expect(eleven.filter((s) => s.oursFirst).length / eleven.length).toBeCloseTo(0.5, 1);
+  });
+
+  test("rehearsal sessions do not count toward the study's shares", async () => {
+    const rehearsalIds = fullIds();
+    for (const voice of VOICE_NAMES) rehearsalIds[voice].ours = "";
+    const store = new MemoryStore();
+    const rehearsal = new StudyApi({ store, grid: { ids: rehearsalIds, oursStandIn: "cartesia" }, studySeed: "t" });
+    await rehearsal.setMatching({ weights: { cartesia: 1, elevenlabs: 1, inworld: 2 } });
+    const { participant } = await rehearsal.signIn({ email: "r@assemblyai.com" });
+    await rehearsal.startSession({ participant });
+    expect(Object.values((await rehearsal.matching()).sinceChange).reduce((a, b) => a + b, 0)).toBe(0);
+  });
+
+  test("refuses weights that are negative, too large, or all zero", async () => {
+    const { api } = setup();
+    for (const weights of [
+      { cartesia: -1, elevenlabs: 1, inworld: 1 },
+      { cartesia: 101, elevenlabs: 1, inworld: 1 },
+      { cartesia: 0, elevenlabs: 0, inworld: 0 },
+    ]) {
+      await expect(api.setMatching({ weights })).rejects.toMatchObject({ status: 400 });
+    }
+  });
+});

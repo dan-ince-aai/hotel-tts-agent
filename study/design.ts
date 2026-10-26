@@ -28,6 +28,14 @@
  *
  * The page never sees any of this: the server keeps the plan and hands the
  * browser an opaque token per call (`server.ts`).
+ *
+ * ## Unequal weights
+ *
+ * The admin can weight the competitors (see {@link chooseCompetitor}) — to put
+ * more sessions on the comparison that is hardest to call, or to pause a
+ * provider. Then the competitor is chosen per session to hit the target shares,
+ * and the per-person block ("each competitor once per half") no longer holds;
+ * voice rotation, the card deal and the per-competitor order balance still do.
  */
 import { CARDS } from "./cards.ts";
 
@@ -157,4 +165,85 @@ export function sessionFor(participant: number, index: number, studySeed?: strin
     throw new Error(`session index must be 1…${SESSIONS_PER_BLOCK}, got ${index}`);
   }
   return plan;
+}
+
+// ---------------------------------------------------------------------------
+// Weighted matching — when the admin wants more of one comparison.
+// ---------------------------------------------------------------------------
+
+/**
+ * How often each competitor is paired with ours, as relative weights. Ours is
+ * in every session regardless; these only decide WHICH competitor it faces. A
+ * weight of 0 takes a competitor out of rotation (a provider that is down).
+ */
+export type CompetitorWeights = Record<Competitor, number>;
+
+export const EQUAL_WEIGHTS: CompetitorWeights = { cartesia: 1, elevenlabs: 1, inworld: 1 };
+
+/** Equal, positive weights: the protocol's balanced block applies unchanged. */
+export function isBalanced(weights: CompetitorWeights): boolean {
+  const values = COMPETITORS.map((c) => weights[c]);
+  return values.every((w) => w > 0 && w === values[0]);
+}
+
+/**
+ * The competitor for the next session under unequal weights: the one furthest
+ * BEHIND its target share of the sessions handed out since the weights were
+ * set. Deterministic rather than a weighted coin, so the shares land on target
+ * at any sample size instead of wandering around it. Ties go to the competitor
+ * this participant has met least, so one person still hears a spread.
+ */
+export function chooseCompetitor(
+  weights: CompetitorWeights,
+  handedOut: Record<Competitor, number>,
+  metByParticipant: Record<Competitor, number>,
+): Competitor {
+  const live = COMPETITORS.filter((c) => weights[c] > 0);
+  if (live.length === 0) throw new Error("every competitor has weight 0; nothing to pair ours with");
+  const totalWeight = live.reduce((sum, c) => sum + weights[c], 0);
+  // +1: the session being handed out now is part of the total it should share.
+  const total = live.reduce((sum, c) => sum + handedOut[c], 0) + 1;
+  const deficit = (c: Competitor) => (weights[c] / totalWeight) * total - handedOut[c];
+  return [...live].sort(
+    (a, b) =>
+      deficit(b) - deficit(a) ||
+      metByParticipant[a] - metByParticipant[b] ||
+      COMPETITORS.indexOf(a) - COMPETITORS.indexOf(b),
+  )[0] as Competitor;
+}
+
+/**
+ * Whether ours goes first when this participant meets `competitor` for the
+ * `meeting`-th time (0-based). Alternates per competitor within a person, and
+ * the first meeting's order alternates across participant numbers — so the
+ * order stays counterbalanced per competitor however the weights skew who is met.
+ */
+export function oursFirstFor(participant: number, competitor: Competitor, meeting: number): boolean {
+  return (participant + COMPETITORS.indexOf(competitor) + meeting) % 2 === 0;
+}
+
+/**
+ * The participant's session `index`, re-paired with `competitor`: the same voice
+ * and persona cards their balanced schedule gives that session, so only the
+ * matching changes.
+ */
+export function weightedSessionFor(
+  participant: number,
+  index: number,
+  competitor: Competitor,
+  meeting: number,
+  studySeed?: string,
+): SessionPlan {
+  const base = sessionFor(participant, index, studySeed);
+  const oursFirst = oursFirstFor(participant, competitor, meeting);
+  const [first, second]: System[] = oursFirst ? ["ours", competitor] : [competitor, "ours"];
+  return {
+    ...base,
+    competitor,
+    oursFirst,
+    calls: [
+      { ...base.calls[0], system: first as System },
+      { ...base.calls[1], system: second as System },
+    ],
+  };
 }

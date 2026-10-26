@@ -350,6 +350,7 @@ const FAILED_AUTH_DELAY_MS = 750;
  *   `client.tsx` picks it by path). It asks for the password and holds it only
  *   for the browser tab.
  * - `GET /api/admin/summary` — what the page shows (`study/admin.ts`).
+ * - `GET`/`POST /api/admin/matching` — the competitor weights (`study/api.ts`).
  * - `GET /api/export/sessions.csv` (the analysis input) and `/api/export/calls.csv`
  *   (per call, with transcripts).
  *
@@ -359,7 +360,7 @@ const FAILED_AUTH_DELAY_MS = 750;
  * you choose and the blueprint's generated token can coexist. With neither set,
  * the routes answer that the admin is off.
  */
-function handleAdmin(store: StudyStore, secrets: string[], clientDir: string) {
+function handleAdmin(store: StudyStore, api: StudyApi, secrets: string[], clientDir: string) {
   return (req: IncomingMessage, res: ServerResponse, url: string, method: string): boolean => {
     // The hook's `url` is the path; the query string is only on `req.url`.
     const parsed = new URL(req.url ?? url, "http://localhost");
@@ -377,6 +378,7 @@ function handleAdmin(store: StudyStore, secrets: string[], clientDir: string) {
     }
     const route = {
       "/api/admin/summary": "summary",
+      "/api/admin/matching": "matching",
       "/api/export/sessions.csv": "sessions",
       "/api/export/calls.csv": "calls",
     }[parsed.pathname];
@@ -387,8 +389,36 @@ function handleAdmin(store: StudyStore, secrets: string[], clientDir: string) {
     }
     const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
     const presented = bearer ?? parsed.searchParams.get("token") ?? "";
-    if (method !== "GET" || !secrets.some((secret) => tokenMatches(presented, secret))) {
+    if (!secrets.some((secret) => tokenMatches(presented, secret))) {
       setTimeout(() => sendJson(res, 401, { error: "wrong password" }), FAILED_AUTH_DELAY_MS);
+      return true;
+    }
+    if (route === "matching" && method === "POST") {
+      readJsonBody(req)
+        .then((body) => api.setMatching(body))
+        .then((view) => {
+          console.info(`[study] matching weights set to ${JSON.stringify(view.weights)}`);
+          sendJson(res, 200, view);
+        })
+        .catch((error: unknown) => {
+          if (error instanceof ApiError) return sendJson(res, error.status, { error: error.message });
+          console.error("[study] saving matching weights failed:", error);
+          if (!res.headersSent) sendJson(res, 500, { error: "could not save the weights" });
+        });
+      return true;
+    }
+    if (method !== "GET") {
+      sendJson(res, 405, { error: "GET only" });
+      return true;
+    }
+    if (route === "matching") {
+      api
+        .matching()
+        .then((view) => sendJson(res, 200, view))
+        .catch((error: unknown) => {
+          console.error("[study] reading matching weights failed:", error);
+          if (!res.headersSent) sendJson(res, 500, { error: "could not read the weights" });
+        });
       return true;
     }
     const includeAll = parsed.searchParams.get("all") === "1";
@@ -490,7 +520,7 @@ async function main(): Promise<void> {
   const clientDir = resolveClientDir(cwd);
   const adminSecrets = [env.STUDY_ADMIN_PASSWORD, env.STUDY_ADMIN_TOKEN].filter((s): s is string => Boolean(s));
   if (adminSecrets.length === 0) console.warn("[study] admin page is off: set STUDY_ADMIN_PASSWORD to turn it on");
-  const adminRoutes = handleAdmin(store, adminSecrets, clientDir);
+  const adminRoutes = handleAdmin(store, api, adminSecrets, clientDir);
   const studyRoutes = handleApi(apiRoutes(api));
   const server = createRuntimeServer({
     runtime: enginesRuntime(built),

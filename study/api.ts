@@ -28,7 +28,17 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { resolveCell, type GridOptions } from "../voices.ts";
 import { cardById, cardView, type CardView } from "./cards.ts";
-import { SESSIONS_PER_BLOCK, sessionFor } from "./design.ts";
+import {
+  chooseCompetitor,
+  type Competitor,
+  COMPETITORS,
+  type CompetitorWeights,
+  isBalanced,
+  SESSIONS_PER_BLOCK,
+  type SessionPlan,
+  sessionFor,
+  weightedSessionFor,
+} from "./design.ts";
 import type { Participant, StudySession, StudyStore } from "./store.ts";
 
 /** A refusal the server turns into that HTTP status with `{ error }`. */
@@ -83,6 +93,25 @@ export const ResponseBody = z.object({
 });
 export const CloseBody = z.object({ participant: z.string().uuid(), session: z.string().uuid() });
 
+const weight = z.number().min(0).max(100);
+export const MatchingBody = z
+  .object({ weights: z.object({ cartesia: weight, elevenlabs: weight, inworld: weight }) })
+  .refine((body) => COMPETITORS.some((c) => body.weights[c] > 0), {
+    message: "at least one competitor needs a weight above 0",
+  });
+
+/** What the admin page shows about matching. */
+export interface MatchingView {
+  weights: CompetitorWeights;
+  /** Equal weights: the protocol's balanced block is in use. */
+  balanced: boolean;
+  changedAt: string | null;
+  /** The share of new sessions each competitor is steered toward. */
+  targetShare: Record<Competitor, number>;
+  /** Study (non-rehearsal) sessions handed out per competitor since the last change. */
+  sinceChange: Record<Competitor, number>;
+}
+
 export interface StudyApiOptions {
   store: StudyStore;
   grid: GridOptions;
@@ -134,7 +163,7 @@ export class StudyApi {
       throw new ApiError(409, `all ${SESSIONS_PER_BLOCK} sessions are done`);
     }
 
-    const plan = sessionFor(participant.number, sessions.length + 1, this.studySeed);
+    const { plan, allocation } = await this.nextPlan(participant.number, sessions);
     const id = this.newId();
     const calls = plan.calls.map((call) => {
       const cell = resolveCell(call.system, plan.voice, this.grid);
@@ -158,6 +187,7 @@ export class StudyApi {
       voice: plan.voice,
       oursFirst: plan.oursFirst,
       rehearsal: this.rehearsal,
+      allocation,
     };
     try {
       await this.store.createSession(session, calls);
@@ -170,6 +200,53 @@ export class StudyApi {
     const created = await this.store.session(id);
     if (!created) throw new Error(`session ${id} vanished after create`);
     return this.sessionView(created);
+  }
+
+  /**
+   * The plan for a participant's next session. Equal weights: their balanced
+   * block, exactly as the protocol lays it out. Unequal: the competitor furthest
+   * behind its target share since the weights changed, with the voice and cards
+   * the block would have used and the per-competitor order kept counterbalanced.
+   */
+  private async nextPlan(
+    participant: number,
+    sessions: StudySession[],
+  ): Promise<{ plan: SessionPlan; allocation: "balanced" | "weighted" }> {
+    const index = sessions.length + 1;
+    const { weights, changedAt } = await this.store.matching();
+    if (isBalanced(weights)) {
+      return { plan: sessionFor(participant, index, this.studySeed), allocation: "balanced" };
+    }
+    const handedOut = await this.store.competitorCounts(changedAt, this.rehearsal);
+    const met = Object.fromEntries(
+      COMPETITORS.map((c) => [c, sessions.filter((s) => s.competitor === c).length]),
+    ) as Record<Competitor, number>;
+    const competitor = chooseCompetitor(weights, handedOut, met);
+    return {
+      plan: weightedSessionFor(participant, index, competitor, met[competitor], this.studySeed),
+      allocation: "weighted",
+    };
+  }
+
+  /** The matching weights and how they are landing — for the admin page. */
+  async matching(): Promise<MatchingView> {
+    const { weights, changedAt } = await this.store.matching();
+    const total = COMPETITORS.reduce((sum, c) => sum + weights[c], 0);
+    return {
+      weights,
+      balanced: isBalanced(weights),
+      changedAt: changedAt?.toISOString() ?? null,
+      targetShare: Object.fromEntries(
+        COMPETITORS.map((c) => [c, total === 0 ? 0 : Math.round((weights[c] / total) * 1000) / 1000]),
+      ) as Record<Competitor, number>,
+      sinceChange: await this.store.competitorCounts(changedAt, false),
+    };
+  }
+
+  async setMatching(raw: unknown): Promise<MatchingView> {
+    const { weights } = parseBody(MatchingBody, raw);
+    await this.store.saveMatching(weights);
+    return this.matching();
   }
 
   async callEvent(raw: unknown): Promise<{ ok: true }> {

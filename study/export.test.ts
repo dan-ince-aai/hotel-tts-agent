@@ -58,7 +58,7 @@ describe("sessionRows", () => {
 
     const [row] = sessionRows(await store.dump());
     const session = await store.session(view.session);
-    expect(Object.keys(row ?? {})).toEqual([...SESSION_COLUMNS]);
+    expect(Object.keys(row ?? {})).toEqual([...SESSION_COLUMNS, "allocation"]);
     expect(row).toMatchObject({
       participant_id: "p0000",
       session_index: 1,
@@ -69,6 +69,7 @@ describe("sessionRows", () => {
       reasons: "human;speed",
       call1_naturalness: 4,
       scored: true,
+      allocation: "balanced",
       setup_failure_reason: null,
       fatal_tts_ours: false,
       ck_slow_llm: false,
