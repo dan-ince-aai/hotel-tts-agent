@@ -26,6 +26,8 @@
  * - `responses` — the questionnaire, one per session.
  * - `turns` — one per reply, the four speed numbers; blanks, never zeroes, for a
  *   stage that did not happen.
+ * - `utterances` — what each side said, committed turn by committed turn. The
+ *   read-back check (`study/readback.ts`) reads the agent's side.
  */
 import type { MetricsCollectedEvent } from "@alexkroman1/aai";
 import postgres from "postgres";
@@ -138,6 +140,13 @@ export interface TurnRow extends TurnTimings {
   readonly callToken: string | null;
 }
 
+/** One committed turn of a call's transcript. */
+export interface Utterance {
+  readonly callToken: string;
+  readonly role: "agent" | "caller";
+  readonly text: string;
+}
+
 /** Normalise an email for identity: trimmed, lower case. */
 export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -170,6 +179,7 @@ export interface StudyStore {
   linkRuntimeSession(runtimeId: string, callToken: string): Promise<void>;
   callForRuntime(runtimeId: string): Promise<string | undefined>;
   recordTurn(runtimeId: string, callToken: string | null, timings: TurnTimings): Promise<void>;
+  recordUtterance(runtimeId: string, utterance: Utterance): Promise<void>;
   /** Save the questionnaire and mark the session complete. Rejects a second answer. */
   saveResponse(response: StudyResponse): Promise<void>;
   response(sessionId: string): Promise<StudyResponse | undefined>;
@@ -189,6 +199,7 @@ export interface StudyDump {
   calls: StudyCall[];
   responses: StudyResponse[];
   turns: TurnRow[];
+  utterances: Utterance[];
 }
 
 /** The rule behind the counters, shared by both stores. */
@@ -224,6 +235,7 @@ export class MemoryStore implements StudyStore {
   private readonly runtimeToCall = new Map<string, string>();
   private readonly responses = new Map<string, StudyResponse>();
   private readonly turns: TurnRow[] = [];
+  private readonly utterances: Utterance[] = [];
 
   async signIn(email: string, token: string): Promise<Participant> {
     const key = normaliseEmail(email);
@@ -297,6 +309,10 @@ export class MemoryStore implements StudyStore {
     this.turns.push({ callToken, ...timings });
   }
 
+  async recordUtterance(_runtimeId: string, utterance: Utterance): Promise<void> {
+    this.utterances.push(utterance);
+  }
+
   async saveResponse(response: StudyResponse): Promise<void> {
     const session = this.sessionsById.get(response.sessionId);
     if (!session) throw new Error(`no session ${response.sessionId}`);
@@ -323,6 +339,7 @@ export class MemoryStore implements StudyStore {
       calls: [...this.callsByToken.values()],
       responses: [...this.responses.values()],
       turns: [...this.turns],
+      utterances: [...this.utterances],
     };
   }
 
@@ -476,6 +493,13 @@ export class PostgresStore implements StudyStore {
     `;
   }
 
+  async recordUtterance(runtimeId: string, u: Utterance): Promise<void> {
+    await this.sql`
+      insert into utterances (runtime_id, call_token, role, text)
+      values (${runtimeId}, ${u.callToken}, ${u.role}, ${u.text})
+    `;
+  }
+
   async saveResponse(r: StudyResponse): Promise<void> {
     await this.sql.begin(async (tx) => {
       await tx`
@@ -504,12 +528,13 @@ export class PostgresStore implements StudyStore {
   }
 
   async dump(): Promise<StudyDump> {
-    const [participants, sessions, calls, responses, turns] = await Promise.all([
+    const [participants, sessions, calls, responses, turns, utterances] = await Promise.all([
       this.sql`select number, token, email, is_test from participants order by number`,
       this.sql`select * from study_sessions order by created_at`,
       this.sql`select * from calls order by created_at, position`,
       this.sql`select * from responses order by created_at`,
       this.sql`select * from turns order by created_at`,
+      this.sql`select call_token, role, text from utterances order by id`,
     ]);
     return {
       participants: participants.map(participantFromRow),
@@ -523,6 +548,11 @@ export class PostgresStore implements StudyStore {
         modelFirstWordMs: row.model_first_word_ms,
         voiceFirstSoundMs: row.voice_first_sound_ms,
         interrupted: row.interrupted,
+      })),
+      utterances: utterances.map((row) => ({
+        callToken: String(row.call_token),
+        role: row.role as Utterance["role"],
+        text: String(row.text),
       })),
     };
   }
@@ -614,6 +644,16 @@ async function ensureSchema(sql: Sql): Promise<void> {
       voice_first_sound_ms integer,
       interrupted          boolean not null,
       created_at           timestamptz not null default now()
+    )
+  `;
+  await sql`
+    create table if not exists utterances (
+      id         bigint generated always as identity primary key,
+      runtime_id text not null,
+      call_token text not null,
+      role       text not null,
+      text       text not null,
+      created_at timestamptz not null default now()
     )
   `;
 }
