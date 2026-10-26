@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { CARDS, cardById, cardView, formatAddress, formatNight } from "./cards.ts";
 import {
+  chooseCompetitor,
   COMPETITORS,
+  isBalanced,
+  oursFirstFor,
+  weightedSessionFor,
   type Competitor,
   scheduleFor,
   SESSIONS_PER_BLOCK,
@@ -169,5 +173,55 @@ describe("the persona cards", () => {
     expect(formatNight("2027-04-03")).toBe("Saturday, April 3rd");
     expect(formatNight("2027-04-11")).toBe("Sunday, April 11th");
     expect(formatNight("2027-04-22")).toBe("Thursday, April 22nd");
+  });
+});
+
+describe("weighted matching", () => {
+  const zero = { cartesia: 0, elevenlabs: 0, inworld: 0 };
+
+  test("equal positive weights are the balanced block; anything else is not", () => {
+    expect(isBalanced({ cartesia: 1, elevenlabs: 1, inworld: 1 })).toBe(true);
+    expect(isBalanced({ cartesia: 3, elevenlabs: 3, inworld: 3 })).toBe(true);
+    expect(isBalanced({ cartesia: 2, elevenlabs: 1, inworld: 1 })).toBe(false);
+    expect(isBalanced({ cartesia: 0, elevenlabs: 0, inworld: 0 })).toBe(false);
+  });
+
+  test("hands out sessions in the target shares, exactly, at any size", () => {
+    const weights = { cartesia: 1, elevenlabs: 1, inworld: 2 };
+    const handed = { ...zero };
+    for (let i = 0; i < 400; i++) handed[chooseCompetitor(weights, handed, zero)]++;
+    expect(handed).toEqual({ cartesia: 100, elevenlabs: 100, inworld: 200 });
+  });
+
+  test("a weight of 0 is never chosen", () => {
+    const weights = { cartesia: 0, elevenlabs: 1, inworld: 1 };
+    const handed = { ...zero };
+    for (let i = 0; i < 50; i++) handed[chooseCompetitor(weights, handed, zero)]++;
+    expect(handed.cartesia).toBe(0);
+    expect(() => chooseCompetitor(zero, zero, zero)).toThrow();
+  });
+
+  test("on a tie, the competitor this participant has met least goes first", () => {
+    const weights = { cartesia: 1, elevenlabs: 1, inworld: 1 };
+    expect(chooseCompetitor(weights, zero, { cartesia: 2, elevenlabs: 0, inworld: 1 })).toBe("elevenlabs");
+  });
+
+  test("keeps call order counterbalanced per competitor however the weights skew", () => {
+    for (const competitor of COMPETITORS) {
+      const firstMeetings = Array.from({ length: 100 }, (_, n) => oursFirstFor(n, competitor, 0));
+      expect(firstMeetings.filter(Boolean)).toHaveLength(50);
+      // And it alternates for one person meeting the same competitor again.
+      expect(oursFirstFor(7, competitor, 1)).toBe(!oursFirstFor(7, competitor, 0));
+    }
+  });
+
+  test("a re-paired session keeps the block's voice and cards, with ours on the right call", () => {
+    const base = sessionFor(4, 2);
+    const paired = weightedSessionFor(4, 2, "inworld", 0);
+    expect(paired.voice).toBe(base.voice);
+    expect(paired.calls.map((c) => c.cardId)).toEqual(base.calls.map((c) => c.cardId));
+    expect(paired.competitor).toBe("inworld");
+    expect(paired.calls[0].system === "ours").toBe(paired.oursFirst);
+    expect(paired.calls.map((c) => c.system).sort()).toEqual(["inworld", "ours"]);
   });
 });

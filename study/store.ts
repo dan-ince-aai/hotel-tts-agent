@@ -28,10 +28,11 @@
  *   stage that did not happen.
  * - `utterances` — what each side said, committed turn by committed turn. The
  *   read-back check (`study/readback.ts`) reads the agent's side.
+ * - `study_settings` — the admin's matching weights, so they survive a restart.
  */
 import type { MetricsCollectedEvent } from "@alexkroman1/aai";
 import postgres from "postgres";
-import type { Competitor, System, VoiceName } from "./design.ts";
+import { type Competitor, COMPETITORS, type CompetitorWeights, EQUAL_WEIGHTS, type System, type VoiceName } from "./design.ts";
 
 export interface Participant {
   readonly number: number;
@@ -51,6 +52,8 @@ export interface StudySession {
   readonly oursFirst: boolean;
   /** Handed out by a server running a stand-in or stock voices — never study data. */
   readonly rehearsal: boolean;
+  /** `balanced`: the protocol's block. `weighted`: paired by the admin's weights. */
+  readonly allocation: "balanced" | "weighted";
   readonly createdAt: Date;
   readonly completedAt: Date | null;
 }
@@ -147,6 +150,15 @@ export interface Utterance {
   readonly text: string;
 }
 
+/** The admin's matching weights, and when they last changed. */
+export interface MatchingSettings {
+  readonly weights: CompetitorWeights;
+  /** Shares are counted from here; `null` until the weights are first changed. */
+  readonly changedAt: Date | null;
+}
+
+export const DEFAULT_MATCHING: MatchingSettings = { weights: EQUAL_WEIGHTS, changedAt: null };
+
 /** Normalise an email for identity: trimmed, lower case. */
 export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -188,6 +200,15 @@ export interface StudyStore {
    * there is nothing fair to compare. It still counts toward the block.
    */
   closeSession(sessionId: string): Promise<void>;
+  matching(): Promise<MatchingSettings>;
+  /** Save new weights; `changedAt` is set to now. */
+  saveMatching(weights: CompetitorWeights): Promise<MatchingSettings>;
+  /**
+   * Sessions handed out per competitor since `since` (all time if `null`),
+   * counting only sessions with this `rehearsal` flag, so rehearsals never skew
+   * the shares real sessions are steered toward.
+   */
+  competitorCounts(since: Date | null, rehearsal: boolean): Promise<Record<Competitor, number>>;
   /** Everything, for the export. */
   dump(): Promise<StudyDump>;
   close(): Promise<void>;
@@ -236,6 +257,7 @@ export class MemoryStore implements StudyStore {
   private readonly responses = new Map<string, StudyResponse>();
   private readonly turns: TurnRow[] = [];
   private readonly utterances: Utterance[] = [];
+  private matchingSettings: MatchingSettings = DEFAULT_MATCHING;
 
   async signIn(email: string, token: string): Promise<Participant> {
     const key = normaliseEmail(email);
@@ -332,6 +354,23 @@ export class MemoryStore implements StudyStore {
     }
   }
 
+  async matching(): Promise<MatchingSettings> {
+    return this.matchingSettings;
+  }
+
+  async saveMatching(weights: CompetitorWeights): Promise<MatchingSettings> {
+    this.matchingSettings = { weights: { ...weights }, changedAt: new Date() };
+    return this.matchingSettings;
+  }
+
+  async competitorCounts(since: Date | null, rehearsal: boolean): Promise<Record<Competitor, number>> {
+    const counts = zeroCounts();
+    for (const s of this.sessionsById.values()) {
+      if (s.rehearsal === rehearsal && (since === null || s.createdAt >= since)) counts[s.competitor]++;
+    }
+    return counts;
+  }
+
   async dump(): Promise<StudyDump> {
     return {
       participants: [...this.participantsByEmail.values()],
@@ -413,9 +452,9 @@ export class PostgresStore implements StudyStore {
     await this.sql.begin(async (tx) => {
       await tx`
         insert into study_sessions
-          (id, participant_number, session_index, competitor, voice, ours_first, rehearsal)
+          (id, participant_number, session_index, competitor, voice, ours_first, rehearsal, allocation)
         values (${session.id}, ${session.participantNumber}, ${session.index}, ${session.competitor},
-                ${session.voice}, ${session.oursFirst}, ${session.rehearsal})
+                ${session.voice}, ${session.oursFirst}, ${session.rehearsal}, ${session.allocation})
       `;
       for (const call of calls) {
         await tx`
@@ -527,6 +566,37 @@ export class PostgresStore implements StudyStore {
     await this.sql`update study_sessions set completed_at = now() where id = ${sessionId} and completed_at is null`;
   }
 
+  async matching(): Promise<MatchingSettings> {
+    const [row] = await this.sql`select value, updated_at from study_settings where key = 'matching'`;
+    if (!row) return DEFAULT_MATCHING;
+    const value = row.value as { weights?: Partial<CompetitorWeights> };
+    return { weights: { ...EQUAL_WEIGHTS, ...value.weights }, changedAt: row.updated_at as Date };
+  }
+
+  async saveMatching(weights: CompetitorWeights): Promise<MatchingSettings> {
+    const [row] = await this.sql`
+      insert into study_settings (key, value, updated_at)
+      values ('matching', ${this.sql.json({ weights })}, now())
+      on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at
+      returning updated_at
+    `;
+    return { weights: { ...weights }, changedAt: (row?.updated_at as Date) ?? new Date() };
+  }
+
+  async competitorCounts(since: Date | null, rehearsal: boolean): Promise<Record<Competitor, number>> {
+    const rows = await this.sql`
+      select competitor, count(*)::int as n from study_sessions
+      where rehearsal = ${rehearsal} and (${since}::timestamptz is null or created_at >= ${since})
+      group by competitor
+    `;
+    const counts = zeroCounts();
+    for (const row of rows) {
+      const competitor = row.competitor as Competitor;
+      if (competitor in counts) counts[competitor] = Number(row.n);
+    }
+    return counts;
+  }
+
   async dump(): Promise<StudyDump> {
     const [participants, sessions, calls, responses, turns, utterances] = await Promise.all([
       this.sql`select number, token, email, is_test from participants order by number`,
@@ -585,6 +655,18 @@ async function ensureSchema(sql: Sql): Promise<void> {
       created_at         timestamptz not null default now(),
       completed_at       timestamptz,
       unique (participant_number, session_index)
+    )
+  `;
+  // Added after the first deploy: a database created before it gains the column,
+  // with every existing session marked balanced — which is what they were.
+  await sql`
+    alter table study_sessions add column if not exists allocation text not null default 'balanced'
+  `;
+  await sql`
+    create table if not exists study_settings (
+      key        text primary key,
+      value      jsonb not null,
+      updated_at timestamptz not null default now()
     )
   `;
   await sql`
@@ -658,6 +740,10 @@ async function ensureSchema(sql: Sql): Promise<void> {
   `;
 }
 
+function zeroCounts(): Record<Competitor, number> {
+  return Object.fromEntries(COMPETITORS.map((c) => [c, 0])) as Record<Competitor, number>;
+}
+
 type Row = Record<string, unknown>;
 
 function participantFromRow(row: Row | undefined): Participant {
@@ -674,6 +760,7 @@ function sessionFromRow(row: Row): StudySession {
     voice: row.voice as VoiceName,
     oursFirst: Boolean(row.ours_first),
     rehearsal: Boolean(row.rehearsal),
+    allocation: row.allocation === "weighted" ? "weighted" : "balanced",
     createdAt: row.created_at as Date,
     completedAt: (row.completed_at as Date | null) ?? null,
   };
