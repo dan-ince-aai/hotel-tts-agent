@@ -2,7 +2,7 @@
 #
 # Apply it from Render: New → Blueprint → point at this repo. Render reads this
 # file, creates BOTH the web service and the managed Postgres below, wires
-# DATABASE_URL between them, and prompts you for the three API keys (the ones
+# DATABASE_URL between them, and prompts you for the four API keys (the ones
 # marked `sync: false` never live in this committed file).
 #
 # See docs/tts-preference-build-plan.md, Phase 9.
@@ -47,11 +47,13 @@ services:
         fromDatabase:
           name: hotel-tts-db
           property: connectionString
-      # The three voice-provider keys. `sync: false` means: not in this file —
+      # The four voice-provider keys. `sync: false` means: not in this file —
       # Render prompts you for each on first apply, and stores them as secrets.
       - key: ASSEMBLYAI_API_KEY
         sync: false
       - key: CARTESIA_API_KEY
         sync: false
       - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: INWORLD_API_KEY
         sync: false

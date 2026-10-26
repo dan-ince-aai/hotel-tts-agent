@@ -6,20 +6,21 @@
  *
  * Run it (the key is read from the environment, or from `.env` if unset):
  *
- *   node inworld-smoke.ts                 # every `inworld` row in voices.ts
+ *   node inworld-smoke.ts                 # every Inworld clone in the voices.ts grid
  *   node inworld-smoke.ts Ashley Dennis   # or the voice ids named here
  *
  * For each voice it opens the connector against the live service, streams one
  * reply in model-sized pieces (so the per-sentence flushes run), flushes, and
- * counts the PCM it got back. Until `voices.ts` carries `inworld` rows, and with
+ * counts the PCM it got back. Until the grid carries Inworld clone ids, and with
  * no ids named, it speaks the descriptor's default voice. An unknown voice id
  * should come back as an error frame — but zero audio for any voice fails the
  * run loudly either way, which is the whole point.
  */
 import { readFileSync } from "node:fs";
-import { VOICES } from "./voices.ts";
+import { VOICE_NAMES } from "./study/design.ts";
+import { VOICE_IDS } from "./voices.ts";
 import { openInworld, registerInworldTts } from "./inworld-tts-host.ts";
-import { INWORLD_TTS_KIND, resolveInworldTtsSettings } from "./inworld-tts.ts";
+import { resolveInworldTtsSettings } from "./inworld-tts.ts";
 
 const SAMPLE_RATE = 24_000;
 const LINE = "The Harborlight Hotel, front desk. How can I help you today?";
@@ -99,9 +100,8 @@ async function main(): Promise<void> {
   }
   unregister();
 
-  // `provider` is widened so this compiles before `voices.ts` gains the kind.
-  const fromRows = VOICES.filter((row) => (row.provider as string) === INWORLD_TTS_KIND).map(
-    (row) => ({ label: row.label, voice: row.voice }),
+  const fromRows = VOICE_NAMES.flatMap((name) =>
+    VOICE_IDS[name].inworld === "" ? [] : [{ label: name, voice: VOICE_IDS[name].inworld }],
   );
   const named = process.argv.slice(2).map((voice) => ({ label: "cli", voice }));
   const fallback = [{ label: "default", voice: resolveInworldTtsSettings({}).voice }];
