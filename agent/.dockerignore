@@ -1,0 +1,30 @@
+# Git, CI and editor files
+.git
+.github/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Local environment: secrets are set as LiveKit Cloud secrets, not baked into the image
+.env
+.env.*
+.venv/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Not needed at runtime
+tests/
+README.md
+LICENSE
+
+# Coding agent guidance and skills
+AGENTS.md
+CLAUDE.md
+.claude/
+skills/
